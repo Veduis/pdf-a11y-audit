@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { makeFixtures } from './fixtures.js';
-import { auditPdf } from '../src/audit.js';
+import { auditPdf, VERSION } from '../src/audit.js';
 import { renderHtml } from '../src/html.js';
 import { toMarkdown, toJson, compareReports, toCsvRow } from '../src/report.js';
 
@@ -139,6 +139,12 @@ test('the registry manifest matches the published package metadata', async () =>
   assert.equal(server.packages[0].version, pkg.version);
   assert.equal(server.packages[0].transport.type, 'stdio');
   assert.ok(server.packages[0].packageArguments.some((arg) => arg.value === '--mcp'));
+});
+
+test('the reported version follows the package manifest', async () => {
+  const pkg = JSON.parse(await fs.readFile(path.join(process.cwd(), 'package.json'), 'utf8'));
+  assert.equal(VERSION, pkg.version);
+  assert.match(VERSION, /^\d+\.\d+\.\d+$/);
 });
 
 test('comparison reports new and fixed findings', async () => {

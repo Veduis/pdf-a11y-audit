@@ -1,10 +1,15 @@
 /**
  * Deterministic audit orchestration and rule evaluation.
  */
+import { readFileSync } from 'node:fs';
 import { loadPdf } from './pdf.js';
 import { RULES, RULE_BY_ID, MANUAL_CHECKS, SEVERITY_WEIGHT } from '../rules/catalog.js';
 
-const VERSION = '0.1.0';
+// Read the version from the manifest instead of duplicating it here, so the
+// CLI, the MCP serverInfo and every report stay in step with the release.
+const { version: VERSION } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+);
 
 function xmlDecode(value) {
   return String(value || '')

@@ -3,7 +3,7 @@
   "name": "io.github.Veduis/pdf-a11y-audit",
   "title": "PDF Accessibility Audit",
   "description": "Local-first PDF accessibility audits with cited findings and an offline HTML report.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "websiteUrl": "https://remediatepdf.com/open/pdf-a11y-audit",
   "repository": {
     "url": "https://github.com/Veduis/pdf-a11y-audit",
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "pdf-a11y-audit",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

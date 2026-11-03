@@ -1,0 +1,18 @@
+# Smithery configuration for pdf-a11y-audit
+# https://smithery.ai/docs/build/project-config
+#
+# The auditor ships as a local stdio server: Smithery installs the repository,
+# so the start command points at the checked-out entrypoint rather than the
+# registry package. That keeps the hosted listing working even before a new npm
+# version is live.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties: {}
+    required: []
+  commandFunction: |-
+    (config) => ({
+      command: 'node',
+      args: ['bin/mcp.js']
+    })

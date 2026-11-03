@@ -26,23 +26,21 @@ for teams publishing public-sector documents.
 
 ## Install
 
-The npm release is pending. Until it is published, run the auditor from a
-local checkout:
-
 ```bash
-git clone https://github.com/Veduis/pdf-a11y-audit.git
-cd pdf-a11y-audit
-npm install
-node bin/cli.js ./document.pdf
-```
-
-After publication, the same package will run without a checkout:
-
-```bash
+# Run without installing
 npx -y pdf-a11y-audit ./document.pdf
+
+# Or install the CLI
 npm install -g pdf-a11y-audit
 pdf-a11y-audit ./document.pdf --format html --out report.html
 ```
+
+Published on npm as
+[`pdf-a11y-audit`](https://www.npmjs.com/package/pdf-a11y-audit) and listed in
+the official MCP Registry as `io.github.Veduis/pdf-a11y-audit`.
+
+Prefer to work from a checkout? Clone the repository, run `npm install`, and
+use `node bin/cli.js` instead.
 
 ## CLI
 

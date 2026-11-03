@@ -1,6 +1,6 @@
 {
   "name": "pdf-a11y-audit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first PDF accessibility auditor with an MCP server, CLI, and self-contained HTML report.",
   "type": "module",
   "license": "MIT",

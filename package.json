@@ -1,0 +1,63 @@
+{
+  "name": "pdf-a11y-audit",
+  "version": "0.1.0",
+  "description": "Local-first PDF accessibility auditor with an MCP server, CLI, and self-contained HTML report.",
+  "type": "module",
+  "license": "MIT",
+  "mcpName": "io.github.Veduis/pdf-a11y-audit",
+  "bin": {
+    "pdf-a11y-audit": "./bin/cli.js",
+    "pdf-a11y-audit-mcp": "./bin/mcp.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "rules",
+    "docs",
+    "examples",
+    "server.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "audit": "node bin/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.4.299",
+    "zod": "^4.6.7"
+  },
+  "author": "Veduis",
+  "homepage": "https://remediatepdf.com/open/pdf-a11y-audit",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Veduis/pdf-a11y-audit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Veduis/pdf-a11y-audit/issues"
+  },
+  "keywords": [
+    "pdf",
+    "accessibility",
+    "a11y",
+    "pdf-ua",
+    "wcag",
+    "section-508",
+    "ada",
+    "mcp",
+    "model-context-protocol",
+    "audit"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -6,7 +6,8 @@
  * the server returned it. No network access and no model call.
  *
  * Usage:
- *   node examples/mcp-client.mjs ./document.pdf
+ *   node examples/mcp-client.mjs ./document.pdf            # compact summary (default)
+ *   node examples/mcp-client.mjs ./document.pdf markdown
  *   node examples/mcp-client.mjs ./document.pdf json
  */
 import path from 'node:path';
@@ -16,10 +17,11 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const file = process.argv[2];
-const format = process.argv[3] === 'json' ? 'json' : 'markdown';
+const requested = process.argv[3] || 'summary';
+const format = ['summary', 'markdown', 'json'].includes(requested) ? requested : 'summary';
 
 if (!file) {
-  process.stderr.write('Usage: node examples/mcp-client.mjs <file.pdf> [json|markdown]\n');
+  process.stderr.write('Usage: node examples/mcp-client.mjs <file.pdf> [summary|markdown|json]\n');
   process.exit(2);
 }
 

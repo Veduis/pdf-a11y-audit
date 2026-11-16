@@ -300,6 +300,67 @@ async function makeClean() {
   return doc.save();
 }
 
+
+const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+
+async function makeAnnotations() {
+  const doc = await PDFDocument.create();
+  const { page, ctx, root, rootRef } = basePageDoc(doc, { title: 'Annotation fixture', withResources: false });
+  const note = ctx.register(ctx.obj({
+    Type: PDFName.of('Annot'),
+    Subtype: PDFName.of('Text'),
+    Rect: ctx.obj([72, 700, 96, 724]),
+    Contents: PDFString.of('A note'),
+  }));
+  const trap = ctx.register(ctx.obj({
+    Type: PDFName.of('Annot'),
+    Subtype: PDFName.of('TrapNet'),
+    Rect: ctx.obj([72, 600, 96, 624]),
+  }));
+  page.node.set(PDFName.of('Annots'), ctx.obj([note, trap]));
+  const p = structElem(ctx, { role: 'P', parent: rootRef, actualText: 'Body' });
+  root.set(PDFName.of('K'), ctx.obj([p]));
+  root.set(PDFName.of('ParentTree'), ctx.register(ctx.obj({ Nums: [0, ctx.obj([])] })));
+  return doc.save();
+}
+
+async function makeTitleMismatch() {
+  const doc = await PDFDocument.create();
+  const { ctx, root, rootRef } = basePageDoc(doc, { title: 'Annual Budget Report', withResources: false });
+  const h1 = structElem(ctx, { role: 'H1', parent: rootRef, actualText: 'Budget Book 2024' });
+  root.set(PDFName.of('K'), ctx.obj([h1]));
+  root.set(PDFName.of('ParentTree'), ctx.register(ctx.obj({ Nums: [0, ctx.obj([])] })));
+  return doc.save();
+}
+
+async function makeImageTagging({ artifactOnly = false } = {}) {
+  const doc = await PDFDocument.create();
+  const { page, ctx, root, rootRef } = basePageDoc(doc, { title: 'Image tagging fixture', withResources: true });
+  const image = await doc.embedPng(TINY_PNG);
+  page.drawImage(image, { x: 40, y: 40, width: 60, height: 60 });
+  const xobjects = page.node.Resources().lookup(PDFName.of('XObject'));
+  const name = [...xobjects.dict.keys()][0].asString().replace(/^\//, '');
+  const lines = [
+    'q',
+    'BT /F1 12 Tf 72 740 Td',
+    '/P <</MCID 0>> BDC',
+    '(Body text for the image tagging fixture.) Tj',
+    'EMC',
+    'ET',
+    '100 0 0 100 40 600 cm',
+    '/Artifact BMC',
+    `/${name} Do`,
+    'EMC',
+    ...(artifactOnly ? ['100 0 0 100 40 450 cm', '/Artifact BMC', `/${name} Do`, 'EMC'] : ['100 0 0 100 40 450 cm', `/${name} Do`]),
+    'Q',
+  ];
+  page.node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream(lines.join('\n'))));
+  const p = structElem(ctx, { role: 'P', parent: rootRef, k: 0 });
+  root.set(PDFName.of('K'), ctx.obj([p]));
+  root.set(PDFName.of('ParentTree'), ctx.register(ctx.obj({ Nums: [0, ctx.obj([p])] })));
+  return doc.save();
+}
+
 export async function makeFixtures(dir) {
   await fs.mkdir(dir, { recursive: true });
   const untaggedDoc = await PDFDocument.create();
@@ -326,6 +387,10 @@ export async function makeFixtures(dir) {
     xmpOnlyTitle: path.join(dir, 'xmp-only-title.pdf'),
     compressedXmp: path.join(dir, 'compressed-xmp.pdf'),
     clean: path.join(dir, 'clean.pdf'),
+    annotations: path.join(dir, 'annotations.pdf'),
+    titleMismatch: path.join(dir, 'title-mismatch.pdf'),
+    images: path.join(dir, 'images.pdf'),
+    imagesArtifact: path.join(dir, 'images-artifact.pdf'),
   };
   await fs.writeFile(files.untagged, await untaggedDoc.save());
   await fs.writeFile(files.taggedGood, await makeTagged(true));
@@ -340,5 +405,9 @@ export async function makeFixtures(dir) {
   await fs.writeFile(files.xmpOnlyTitle, await makeXmpFixture({}));
   await fs.writeFile(files.compressedXmp, await makeXmpFixture({ compress: true, infoTitle: true }));
   await fs.writeFile(files.clean, await makeClean());
+  await fs.writeFile(files.annotations, await makeAnnotations());
+  await fs.writeFile(files.titleMismatch, await makeTitleMismatch());
+  await fs.writeFile(files.images, await makeImageTagging({}));
+  await fs.writeFile(files.imagesArtifact, await makeImageTagging({ artifactOnly: true }));
   return files;
 }

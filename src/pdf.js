@@ -668,6 +668,73 @@ function countReferenceXObjects(ctx, resources, depth = 0) {
   return count;
 }
 
+
+/** Decode a PDF name token (handles #XX escapes). */
+function decodePdfName(name) {
+  return name.replace(/#([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+/** Collect XObject resources recursively: name -> { stream, kind } for the current level. */
+function xobjectResources(ctx, resources) {
+  const map = new Map();
+  const dict = asDict(ctx, lookup(ctx, resources, 'XObject'));
+  if (!dict) return map;
+  for (const [key, value] of dict.entries()) {
+    const name = decodePdfName(key.asString ? key.asString().replace(/^\//, '') : String(key));
+    const stream = streamOf(ctx, value);
+    if (!stream) continue;
+    const subtype = nameOf(lookup(ctx, stream.dict, 'Subtype'));
+    map.set(name, { stream, kind: subtype === 'Image' ? 'image' : subtype === 'Form' ? 'form' : 'other' });
+  }
+  return map;
+}
+
+/**
+ * Walk a content stream (and any Form XObjects it paints) to find image
+ * XObjects painted outside Figure/Formula/Form or Artifact marked content.
+ * This is what PDF/UA-1 §7.3 needs for image coverage and the text layer cannot
+ * see it. Inline images are ignored (documented limitation).
+ */
+function scanUntaggedImages(ctx, contentText, xobjects, depth = 0, inheritedStack = []) {
+  if (!contentText || depth > 3) return 0;
+  const stack = [...inheritedStack];
+  let untagged = 0;
+  const token = /\/([A-Za-z0-9#_.+-]+)\s*(?:<<[\s\S]*?>>)?\s*(BDC|BMC)|EMC|\/([A-Za-z0-9#_.+-]+)\s+Do/g;
+  let match;
+  while ((match = token.exec(contentText)) !== null) {
+    if (match[2]) {
+      stack.push(decodePdfName(match[1]));
+      continue;
+    }
+    if (match[0] === 'EMC') {
+      if (stack.length) stack.pop();
+      continue;
+    }
+    const painted = decodePdfName(match[3] || '');
+    const target = xobjects.get(painted);
+    if (!target) continue;
+    if (target.kind === 'form') {
+      untagged += scanUntaggedImages(ctx, streamBytesText(ctx, target.stream).text, xobjectResources(ctx, lookup(ctx, target.stream.dict, 'Resources')), depth + 1, stack);
+      continue;
+    }
+    if (target.kind !== 'image') continue;
+    const taggedOrArtifact = stack.some((tag) => /^(Artifact|Figure|Formula|Form)$/i.test(tag));
+    if (!taggedOrArtifact) untagged += 1;
+  }
+  return untagged;
+}
+
+function pageContentText(ctx, page) {
+  const contents = resolveValue(ctx, lookup(ctx, page.node, 'Contents'));
+  const streams = contents instanceof PDFArray ? contents.asArray() : [contents];
+  let text = '';
+  for (const entry of streams) {
+    const stream = streamOf(ctx, entry);
+    if (stream) text += streamBytesText(ctx, stream).text;
+  }
+  return text;
+}
+
 async function parsePageDetails(doc, pdfDoc, options = {}) {
   const ctx = doc.context;
   const pages = [];
@@ -762,8 +829,23 @@ async function parsePageDetails(doc, pdfDoc, options = {}) {
 
     const resources = pdfPages[index].node.Resources ? pdfPages[index].node.Resources() : lookup(ctx, pdfPages[index].node, 'Resources');
     let images = countImageResources(ctx, resources);
+    const isScannedPage = images > 0 && chars < 20;
+    let pageUntaggedImages = 0;
+    if (!isScannedPage) {
+      try {
+        pageUntaggedImages = scanUntaggedImages(ctx, pageContentText(ctx, pdfPages[index]), xobjectResources(ctx, resources));
+      } catch { pageUntaggedImages = 0; }
+    }
     const node = pdfPages[index].node;
-    const annots = arrayOf(ctx, lookup(ctx, node, 'Annots')).map((value) => asDict(value)).filter(Boolean);
+    const annotsRaw = lookup(ctx, node, 'Annots');
+    const annots = arrayOf(ctx, annotsRaw).map((value) => asDict(ctx, value)).filter(Boolean);
+    if (process.env.DEBUG_ANNOTS) {
+      const rawEntries = rawArray(ctx, annotsRaw);
+      console.error('DEBUG annots', index, annotsRaw && annotsRaw.constructor && annotsRaw.constructor.name, 'raw', rawEntries.length, 'resolved', rawEntries.map((entry) => (entry instanceof PDFRef ? 'ref' : entry && entry.constructor && entry.constructor.name)).slice(0, 4), 'mapped', annots.length);
+      const resolvedList = arrayOf(ctx, annotsRaw);
+      console.error('DEBUG arrayOf types', resolvedList.map((v) => v === null ? 'null' : v === undefined ? 'undef' : (v.constructor && v.constructor.name)), 'asDict', resolvedList.map((v) => asDict(ctx, v) ? 'dict' : 'no'));
+
+    }
     for (const annot of annots) {
       annotations.push({
         page: index + 1,
@@ -782,7 +864,8 @@ async function parsePageDetails(doc, pdfDoc, options = {}) {
       hasText: chars > 0,
       annotations: annots.length,
       tabs: nameOf(lookup(ctx, node, 'Tabs')),
-      scanned: images > 0 && chars < 20,
+      untaggedImages: pageUntaggedImages,
+      scanned: isScannedPage,
       blank: images === 0 && chars === 0,
       sparse: chars > 0 && chars < 20 && images === 0,
     });
@@ -793,8 +876,10 @@ async function parsePageDetails(doc, pdfDoc, options = {}) {
     if (typeof page.cleanup === 'function') { try { page.cleanup(); } catch { /* ignore */ } }
   }
 
+  const untaggedImagePages = pages.filter((page) => page.untaggedImages > 0).map((page) => page.number);
   return {
     pages,
+    untaggedImages: { count: pages.reduce((sum, page) => sum + page.untaggedImages, 0), pages: untaggedImagePages },
     mcidOrder,
     mcidText,
     annotations,

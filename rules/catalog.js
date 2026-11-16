@@ -654,6 +654,50 @@ export const RULES = [
     remediation: 'Rebuild the attachment entry with /F and /UF file names.',
     standards: [std('PDF/UA-1', '§7.11')],
   },
+  {
+    id: 'figures.untagged-images',
+    title: 'Image is neither tagged as a figure nor marked as an artifact',
+    category: 'Figures',
+    severity: 'serious',
+    automated: true,
+    summary: 'An image is painted outside Figure/Formula or Artifact marked content.',
+    why: 'PDF/UA-1 §7.3 requires every meaningful image to be tagged as a Figure with alternative text, or marked as an artifact when decorative. An unmarked image is invisible to the structure tree and to assistive technology.',
+    remediation: 'Wrap the image in Figure marked content and give the structure element /Alt, or mark decorative images as artifacts.',
+    standards: [std('PDF/UA-1', '§7.3'), std('WCAG 2.1 AA', '1.1.1')],
+  },
+  {
+    id: 'annotations.struct-parent',
+    title: 'Annotation is not in the structure tree',
+    category: 'Links',
+    severity: 'moderate',
+    automated: true,
+    summary: 'An annotation other than a widget, link or printer mark has no resolvable /StructParent entry.',
+    why: 'PDF/UA-1 §7.18.1 requires annotations other than widgets, links and printer marks to be tagged so they are announced in context. An untagged annotation may be skipped or read without its surrounding content.',
+    remediation: 'Tag the annotation and place its structure element in the reading order, or remove the decoration.',
+    standards: [std('PDF/UA-1', '§7.18.1'), std('WCAG 2.1 AA', '1.3.1')],
+  },
+  {
+    id: 'annotations.trapnet',
+    title: 'Document contains a TrapNet annotation',
+    category: 'Document',
+    severity: 'moderate',
+    automated: true,
+    summary: 'A TrapNet annotation is present.',
+    why: 'TrapNet annotations were deprecated by ISO 32000-1 and PDF/UA-1 does not permit them; they have no accessible purpose.',
+    remediation: 'Remove the TrapNet annotation before publishing.',
+    standards: [std('PDF/UA-1', '§7.18.1'), std('ISO 32000-1', '12.5.6.8')],
+  },
+  {
+    id: 'pdfua.title-mismatch',
+    title: 'Document title disagrees with the first heading',
+    category: 'Document',
+    severity: 'advisory',
+    automated: true,
+    summary: 'The document title and the first heading describe different things.',
+    why: 'A title and first heading that disagree confuse readers and make the document harder to identify. This is a quality heuristic, not a conformance failure.',
+    remediation: 'Make the title and the first H1 say the same thing, or make the difference deliberate and clear.',
+    standards: [std('PDF/UA-1', '§7.1'), std('WCAG 2.1 AA', '2.4.2')],
+  },
 ];
 
 /**
@@ -816,6 +860,10 @@ export const SCORING = {
   'structure.reference-xobject': { tier: 'blocking', weight: 8, cap: 1 },
   'pdfua.optional-content': { tier: 'polish', weight: 2, cap: 3, aggregate: true },
   'pdfua.embedded-files': { tier: 'polish', weight: 2, cap: 3, aggregate: true },
+  'figures.untagged-images': { tier: 'blocking', weight: 8, cap: 1, aggregate: true },
+  'annotations.struct-parent': { tier: 'polish', weight: 3, cap: 3, aggregate: true },
+  'annotations.trapnet': { tier: 'polish', weight: 2, cap: 3, aggregate: true },
+  'pdfua.title-mismatch': { tier: 'info', weight: 0 },
 };
 
 export const STANDARD_LABELS = {

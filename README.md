@@ -175,7 +175,7 @@ directory, so absolute paths are safer.
 
 ## What it checks
 
-There are **58 automated checks** and **10 manual checks**. The automated engine
+There are **62 automated checks** and **10 manual checks**. The automated engine
 covers, among other things:
 
 - **Document:** tagging, `/MarkInfo`, parent tree, suspects, role map, language,
@@ -219,7 +219,7 @@ tracking. It includes:
 - "What to fix first", deduplicated by rule;
 - evidence and remediation for every finding;
 - the standards mapping;
-- the full automated check register (all 58, including skipped checks);
+- the full automated check register (all 62, including skipped checks);
 - the manual review checklist and limitations;
 - a machine-readable JSON copy of the report in a `<script type="application/json">`
   block.

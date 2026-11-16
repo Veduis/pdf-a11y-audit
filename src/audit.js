@@ -33,6 +33,8 @@ const STRUCTURAL_RULES = new Set([
   'lists.empty-item', 'lists.listnumbering',
   'order.mcid-orphan', 'order.mcid-missing', 'order.mcid-order', 'order.untagged-text', 'order.artifact-nesting',
   'notes.id',
+  'figures.untagged-images',
+  'annotations.struct-parent',
 ]);
 
 function normalizeText(value) {
@@ -720,6 +722,43 @@ export async function auditPdf(filePath, options = {}) {
   });
   evaluate('outline.empty', () => {
     if (doc.outlineEmpty) add('outline.empty', { evidence: { emptyEntries: doc.outlineEmpty } });
+  });
+  evaluate('figures.untagged-images', () => {
+    if (doc.untaggedImages && doc.untaggedImages.count > 0) {
+      add('figures.untagged-images', {
+        page: doc.untaggedImages.pages[0] ?? null,
+        message: `${doc.untaggedImages.count} image${doc.untaggedImages.count === 1 ? ' is' : 's are'} painted outside Figure/Formula or Artifact marked content.`,
+        evidence: { occurrences: doc.untaggedImages.count, pages: doc.untaggedImages.pages.slice(0, 50) },
+      });
+    }
+  });
+  evaluate('annotations.struct-parent', () => {
+    const exempt = new Set(['Widget', 'Link', 'PrinterMark', 'Popup', 'TrapNet']);
+    for (const annotation of doc.annotations) {
+      if (!annotation.subtype || exempt.has(annotation.subtype)) continue;
+      const key = annotation.structParent;
+      const resolved = key != null && doc.parentTree.byStructParent.has(String(key));
+      if (!resolved) add('annotations.struct-parent', { page: annotation.page, message: `A ${annotation.subtype} annotation has no resolvable /StructParent entry.` });
+    }
+  });
+  evaluate('annotations.trapnet', () => {
+    for (const annotation of doc.annotations) {
+      if (annotation.subtype === 'TrapNet') add('annotations.trapnet', { page: annotation.page });
+    }
+  });
+  evaluate('pdfua.title-mismatch', () => {
+    const title = normalizeText(metadataTitle || xmpTitle);
+    const first = doc.structure.headings[0];
+    if (!title || !first) return;
+    const heading = elementText(first, doc, children);
+    if (!heading) return;
+    const normalize = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const normalizedTitle = normalize(title);
+    const normalizedHeading = normalize(heading);
+    if (normalizedTitle.length < 4 || normalizedHeading.length < 4) return;
+    if (normalizedTitle === normalizedHeading) return;
+    if (normalizedTitle.includes(normalizedHeading) || normalizedHeading.includes(normalizedTitle)) return;
+    add('pdfua.title-mismatch', { message: `The title "${title}" and the first heading "${heading}" describe different things.`, evidence: { title, firstHeading: heading } });
   });
   evaluate('notes.id', () => {
     const ids = new Map();

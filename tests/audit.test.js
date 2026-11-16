@@ -112,6 +112,33 @@ test('compressed XMP metadata is inflated before parsing', async () => {
   assert.ok(!ids.has('pdfua.metadata-stream'));
 });
 
+// --- annotations, images, title consistency --------------------------------
+test('untagged annotations and TrapNet annotations are reported', async () => {
+  const report = await auditPdf(files.annotations);
+  const ids = ruleIds(report);
+  assert.ok(ids.has('annotations.struct-parent'), 'a Text annotation without StructParent must be reported');
+  assert.ok(ids.has('annotations.trapnet'), 'TrapNet annotations are not permitted');
+});
+
+test('images painted outside Figure or Artifact marking are reported', async () => {
+  const report = await auditPdf(files.images);
+  const finding = report.findings.find((entry) => entry.ruleId === 'figures.untagged-images');
+  assert.ok(finding, 'expected figures.untagged-images');
+  assert.equal(finding.occurrences, 1, 'the image painted inside Artifact must not be counted');
+});
+
+test('images inside Artifact marking are not reported', async () => {
+  const report = await auditPdf(files.imagesArtifact);
+  assert.ok(!ruleIds(report).has('figures.untagged-images'));
+});
+
+test('a title/first-heading mismatch is information only', async () => {
+  const report = await auditPdf(files.titleMismatch);
+  const finding = report.findings.find((entry) => entry.ruleId === 'pdfua.title-mismatch');
+  assert.ok(finding, 'expected pdfua.title-mismatch');
+  assert.equal(finding.tier, 'info');
+});
+
 // --- scoring integrity -----------------------------------------------------
 test('a fully tagged vector-only document can reach a clean result', async () => {
   const report = await auditPdf(files.clean);

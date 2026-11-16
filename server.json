@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Veduis/pdf-a11y-audit",
   "title": "PDF Accessibility Audit",
-  "description": "Local-first PDF accessibility triage with cited findings, two triage scores and an offline HTML report. Not a PDF/UA validator.",
+  "description": "Local-first PDF accessibility triage: cited findings, offline HTML report, not a validator.",
   "version": "0.2.0",
   "websiteUrl": "https://remediatepdf.com/open/pdf-a11y-audit",
   "repository": {

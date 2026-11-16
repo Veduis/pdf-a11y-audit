@@ -11,10 +11,19 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { auditPdf, VERSION } from './audit.js';
 import { renderHtml } from './html.js';
-import { toJson, toMarkdown, toCsvRow, CSV_HEADER, compareReports } from './report.js';
-import { RULES, RULE_BY_ID, MANUAL_CHECKS, MANUAL_BY_ID } from '../rules/catalog.js';
+import { toJson, toMarkdown, toSummary, toCsvRow, CSV_HEADER, compareReports, topFixRules } from './report.js';
+import { RULES, RULE_BY_ID, MANUAL_CHECKS, MANUAL_BY_ID, SCORING } from '../rules/catalog.js';
 
-const SEVERITIES = ['critical', 'serious', 'moderate', 'minor', 'advisory'];
+const DEFAULT_MAX_FINDINGS = 500;
+const DEFAULT_MAX_FILES = 1000;
+const DEFAULT_MAX_DEPTH = 8;
+const SEVERITY_ENUM = ['critical', 'serious', 'moderate', 'minor', 'advisory'];
+
+const INSTRUCTIONS = `pdf-a11y-audit is a local PDF accessibility triage tool. It reads a PDF on this machine and returns cited findings plus two triage scores (blockingScore for PDF/UA-critical issues, polishScore for quality issues). It never uploads a document, never calls a model and never opens a network connection.
+
+Use format:"summary" (the default) for a compact triage verdict, "markdown" for a human-readable report, "json" for the full machine-readable report, and "html" for a self-contained report file. Relative paths and the default HTML output resolve against the server process working directory, so prefer absolute paths or pass output explicitly.
+
+The scores are triage signals, not PDF/UA conformance scores. A clean audit does not certify accessibility: manual checks (contrast, alt-text quality, reading order, OCR accuracy, screen reader pass) remain mandatory, and conformance decisions need veraPDF or PAC plus a screen reader. Writers (audit_pdf/render_report with output, format html) refuse to replace an existing file unless overwrite:true is passed.`;
 
 function text(value) {
   return { content: [{ type: 'text', text: String(value) }] };
@@ -24,39 +33,48 @@ function error(message) {
   return { content: [{ type: 'text', text: String(message) }], isError: true };
 }
 
-function severityRank(value) {
-  return SEVERITIES.indexOf(value);
-}
-
-async function collectPdfPaths(inputs, recursive = true) {
+async function collectPdfPaths(inputs, { recursive = true, maxFiles = DEFAULT_MAX_FILES, maxDepth = DEFAULT_MAX_DEPTH } = {}) {
   const out = [];
-  for (const input of inputs) {
+  let truncated = false;
+  async function walk(input, depth) {
+    if (out.length >= maxFiles) { truncated = true; return; }
     const absolute = path.resolve(process.cwd(), input);
     const stat = await fs.stat(absolute).catch(() => null);
     if (!stat) throw new Error(`Not found: ${input}`);
-    if (stat.isFile()) { out.push(absolute); continue; }
-    if (!stat.isDirectory()) continue;
+    if (stat.isFile()) { out.push(absolute); return; }
+    if (!stat.isDirectory() || depth > maxDepth) return;
     const entries = await fs.readdir(absolute, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
       const full = path.join(absolute, entry.name);
-      if (entry.isFile() && /\.pdf$/i.test(entry.name)) out.push(full);
-      if (recursive && entry.isDirectory()) out.push(...await collectPdfPaths([full], true));
+      if (entry.isFile() && /\.pdf$/i.test(entry.name)) {
+        out.push(full);
+        if (out.length >= maxFiles) { truncated = true; return; }
+      }
+      if (recursive && entry.isDirectory()) await walk(full, depth + 1);
     }
   }
-  return [...new Set(out)];
+  for (const input of inputs) await walk(input, 0);
+  return { files: [...new Set(out)], truncated };
+}
+
+function ruleTier(ruleId) {
+  return (SCORING[ruleId] && SCORING[ruleId].tier) || 'info';
 }
 
 function rulesMarkdown() {
-  const automated = RULES.map((rule) => `| \`${rule.id}\` | ${rule.category} | ${rule.severity} | ${rule.title} |`).join('\n');
-  const manual = MANUAL_CHECKS.map((rule) => `| \`${rule.id}\` | ${rule.category} | manual | ${rule.title} |`).join('\n');
+  const automated = RULES.map((rule) => `| \`${rule.id}\` | ${rule.category} | ${rule.severity} | ${ruleTier(rule.id)} | ${rule.title} |`).join('\n');
+  const manual = MANUAL_CHECKS.map((rule) => `| \`${rule.id}\` | ${rule.category} | manual | info | ${rule.title} |`).join('\n');
   return `# pdf-a11y-audit checks
 
 Automated checks are deterministic. Manual checks are listed in every report and
-must not be treated as passed by the auditor.
+must not be treated as passed by the auditor. Tiers: blocking = PDF/UA-critical
+or serious and feeds blockingScore; polish = quality and feeds polishScore;
+info = reported but never scored.
 
-| Rule | Category | Severity | Title |
-|---|---|---|---|
+| Rule | Category | Severity | Tier | Title |
+|---|---|---|---|---|
 ${automated}
 ${manual}
 
@@ -71,7 +89,8 @@ function explainRule(id) {
 
 **Rule:** \`${rule.id}\`  
 **Category:** ${rule.category}  
-**Severity:** ${rule.severity}${rule.automated === false ? ' (manual)' : ''}
+**Severity:** ${rule.severity}${rule.automated === false ? ' (manual)' : ''}${rule.automated === false ? '' : `  
+**Tier:** ${ruleTier(rule.id)}`}
 
 ${rule.summary}
 
@@ -80,50 +99,118 @@ ${rule.why ? `**Why it matters:** ${rule.why}\n` : ''}${rule.guidance ? `**How t
 ${standards}`;
 }
 
-function auditSummaryLine(report) {
-  return `${report.file.name}: ${report.summary.status} · ${report.summary.score}/100 · ${report.summary.findings} finding${report.summary.findings === 1 ? '' : 's'}`;
+function scoreLine(report) {
+  return `${report.file.name}: ${report.summary.status} · blocking ${report.summary.blockingScore}/100 · polish ${report.summary.polishScore}/100 · ${report.summary.findings} finding${report.summary.findings === 1 ? '' : 's'} (${report.summary.occurrences} occurrences)`;
+}
+
+function envelope(report, output) {
+  return {
+    summary: report.summary,
+    file: report.file,
+    ...(output ? { output } : {}),
+  };
+}
+
+async function writeTarget(target, contents, overwrite) {
+  const absolute = path.resolve(process.cwd(), target);
+  const existing = await fs.stat(absolute).catch(() => null);
+  if (existing && !overwrite) {
+    throw new Error(`Refusing to overwrite ${absolute}. Pass overwrite: true, or choose a new output path.`);
+  }
+  await fs.mkdir(path.dirname(absolute), { recursive: true });
+  await fs.writeFile(absolute, contents, 'utf8');
+  return absolute;
+}
+
+function defaultHtmlPath(filePath) {
+  const absolute = path.resolve(process.cwd(), filePath);
+  const extension = path.extname(absolute);
+  const stem = path.basename(absolute, extension);
+  return path.join(process.cwd(), `${stem}-a11y-report.html`);
+}
+
+const summaryEnvelopeSchema = z.object({
+  summary: z.object({
+    status: z.string(),
+    score: z.number(),
+    blockingScore: z.number(),
+    polishScore: z.number(),
+    findings: z.number(),
+    occurrences: z.number(),
+  }).passthrough(),
+  file: z.object({ name: z.string(), bytes: z.number(), sha256: z.string() }).passthrough(),
+  output: z.string().optional(),
+});
+
+const comparisonSchema = z.object({
+  compatible: z.boolean(),
+  reason: z.string().optional(),
+  before: z.object({}).passthrough().optional(),
+  after: z.object({}).passthrough().optional(),
+  scoreDelta: z.object({}).passthrough().optional(),
+  newFindings: z.array(z.object({}).passthrough()).optional(),
+  fixedFindings: z.array(z.object({}).passthrough()).optional(),
+  persisting: z.array(z.object({}).passthrough()).optional(),
+  summary: z.object({}).passthrough().optional(),
+});
+
+let auditQueue = Promise.resolve();
+
+/** Serialize audits: pdf-lib warning suppression and PDF.js page memory are process-global. */
+function enqueueAudit(task) {
+  const run = auditQueue.then(task, task);
+  auditQueue = run.catch(() => {});
+  return run;
 }
 
 export function createServer() {
-  const server = new McpServer({ name: 'pdf-a11y-audit', version: VERSION });
+  const server = new McpServer(
+    { name: 'pdf-a11y-audit', version: VERSION, title: 'PDF Accessibility Audit (local triage)' },
+    { instructions: INSTRUCTIONS },
+  );
 
   server.registerTool('audit_pdf', {
     title: 'Audit a PDF',
-    description: 'Audit one local PDF for accessibility structure, headings, tables, figures, forms, reading order, fonts, scans, metadata and navigation. Returns JSON, Markdown or a self-contained HTML report. No upload and no model call.',
+    description: 'Audit one local PDF for accessibility structure, headings, tables, figures, forms, reading order, fonts, scans, metadata and navigation. Returns a compact summary by default, or Markdown, JSON or a self-contained HTML report. No upload and no model call. Scores are triage signals, not a conformance certificate.',
     inputSchema: {
-      path: z.string().describe('Path to a local PDF file'),
-      format: z.enum(['json', 'markdown', 'html']).optional().describe('Output format (default markdown)'),
-      output: z.string().optional().describe('Write HTML or Markdown to this path; omit to return text or use the default HTML filename'),
-      maxFindings: z.number().int().positive().max(5000).optional().describe('Cap findings per document (default 500)'),
+      path: z.string().describe('Path to a local PDF file (absolute, or relative to the server working directory)'),
+      format: z.enum(['summary', 'json', 'markdown', 'html']).optional().describe('Output format (default summary)'),
+      output: z.string().optional().describe('Write the report to this path (HTML uses <name>-a11y-report.html in the current directory when omitted)'),
+      maxFindings: z.number().int().positive().max(5000).optional().describe('Maximum findings to return; scores and counts always use every finding (default 500)'),
+      minSeverity: z.enum(SEVERITY_ENUM).optional().describe('Only return findings at or above this severity (scores are unaffected)'),
+      overwrite: z.boolean().optional().describe('Allow replacing an existing output file (default false)'),
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ path: filePath, format = 'markdown', output, maxFindings }) => {
+    outputSchema: summaryEnvelopeSchema.shape,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  }, async ({ path: filePath, format = 'summary', output, maxFindings, minSeverity, overwrite = false }, extra) => {
     try {
-      const report = await auditPdf(filePath, { maxFindings: maxFindings || 500 });
+      const report = await enqueueAudit(() => auditPdf(filePath, { maxFindings: maxFindings || DEFAULT_MAX_FINDINGS, minSeverity, signal: extra && extra.signal }));
       if (format === 'json') {
         const json = toJson(report);
         if (output) {
-          const target = path.resolve(process.cwd(), output);
-          await fs.mkdir(path.dirname(target), { recursive: true });
-          await fs.writeFile(target, json, 'utf8');
-          return { content: [{ type: 'text', text: `${auditSummaryLine(report)}\n\nJSON report: ${target}` }], structuredContent: { summary: report.summary, file: report.file, output: target } };
+          const target = await writeTarget(output, json, overwrite);
+          return { content: [{ type: 'text', text: `${scoreLine(report)}\n\nJSON report: ${target}` }], structuredContent: envelope(report, target) };
         }
-        return { content: [{ type: 'text', text: json }], structuredContent: report };
+        return { content: [{ type: 'text', text: json }], structuredContent: envelope(report) };
       }
       if (format === 'html') {
-        const target = output ? path.resolve(process.cwd(), output) : path.join(process.cwd(), `${path.basename(filePath, '.pdf')}-a11y-report.html`);
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(target, renderHtml(report), 'utf8');
-        return { content: [{ type: 'text', text: `${auditSummaryLine(report)}\n\nHTML report: ${target}` }], structuredContent: { summary: report.summary, file: report.file, output: target } };
+        const target = await writeTarget(output || defaultHtmlPath(filePath), renderHtml(report), overwrite);
+        return { content: [{ type: 'text', text: `${scoreLine(report)}\n\nHTML report: ${target}` }], structuredContent: envelope(report, target) };
       }
-      const markdown = toMarkdown(report);
+      if (format === 'markdown') {
+        const markdown = toMarkdown(report);
+        if (output) {
+          const target = await writeTarget(output, markdown, overwrite);
+          return { content: [{ type: 'text', text: `${scoreLine(report)}\n\nMarkdown report: ${target}` }], structuredContent: envelope(report, target) };
+        }
+        return { content: [{ type: 'text', text: markdown }], structuredContent: envelope(report) };
+      }
+      const summary = toSummary(report);
       if (output) {
-        const target = path.resolve(process.cwd(), output);
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(target, markdown, 'utf8');
-        return { content: [{ type: 'text', text: `${auditSummaryLine(report)}\n\nMarkdown report: ${target}` }], structuredContent: { summary: report.summary, file: report.file, output: target } };
+        const target = await writeTarget(output, summary, overwrite);
+        return { content: [{ type: 'text', text: `${summary}\n\nSummary written to: ${target}` }], structuredContent: envelope(report, target) };
       }
-      return { content: [{ type: 'text', text: markdown }], structuredContent: report };
+      return { content: [{ type: 'text', text: summary }], structuredContent: envelope(report) };
     } catch (err) {
       return error(`Audit failed: ${err && err.message || err}`);
     }
@@ -131,28 +218,61 @@ export function createServer() {
 
   server.registerTool('audit_batch', {
     title: 'Audit a folder of PDFs',
-    description: 'Audit every PDF in one or more local files or directories and return a compact comparison table. Use JSON to get full reports.',
+    description: 'Audit every PDF in one or more local files or directories and return a compact comparison table. Files that fail to parse are reported individually instead of aborting the batch. Use format "json" for full reports.',
     inputSchema: {
       paths: z.array(z.string()).min(1).describe('Files or directories to scan'),
       recursive: z.boolean().optional().describe('Walk subdirectories (default true)'),
       format: z.enum(['json', 'markdown', 'csv']).optional().describe('Output format (default markdown)'),
       maxFindings: z.number().int().positive().max(5000).optional(),
+      minSeverity: z.enum(SEVERITY_ENUM).optional(),
+      maxFiles: z.number().int().positive().max(10000).optional().describe('Stop collecting after this many PDFs (default 1000)'),
+      maxDepth: z.number().int().positive().max(64).optional().describe('Maximum directory depth (default 8)'),
+    },
+    outputSchema: {
+      count: z.number(),
+      succeeded: z.number(),
+      failed: z.number(),
+      truncated: z.boolean(),
+      reports: z.array(z.object({ summary: z.object({}).passthrough(), file: z.object({}).passthrough() }).passthrough()),
+      errors: z.array(z.object({ file: z.string(), error: z.string() }).passthrough()),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ paths, recursive = true, format = 'markdown', maxFindings }) => {
+  }, async ({ paths, recursive = true, format = 'markdown', maxFindings, minSeverity, maxFiles, maxDepth }, extra) => {
     try {
-      const files = await collectPdfPaths(paths, recursive);
-      if (!files.length) return error('No PDF files found.');
+      const collected = await collectPdfPaths(paths, { recursive, maxFiles: maxFiles || DEFAULT_MAX_FILES, maxDepth: maxDepth || DEFAULT_MAX_DEPTH });
+      if (!collected.files.length) return error('No PDF files found.');
       const reports = [];
-      for (const file of files) reports.push(await auditPdf(file, { maxFindings: maxFindings || 500 }));
-      if (format === 'json') return { content: [{ type: 'text', text: JSON.stringify(reports, null, 2) }], structuredContent: { reports } };
-      if (format === 'csv') return text([CSV_HEADER, ...reports.map(toCsvRow)].join('\n'));
-      const lines = ['# PDF accessibility batch', '', '| File | Status | Score | Critical | Serious | Moderate | Advisory |', '|---|---:|---:|---:|---:|---:|---:|'];
-      for (const report of reports) {
-        lines.push(`| ${report.file.name} | ${report.summary.status} | ${report.summary.score} | ${report.summary.critical} | ${report.summary.serious} | ${report.summary.moderate} | ${report.summary.advisory} |`);
+      const errors = [];
+      for (const file of collected.files) {
+        try {
+          reports.push(await enqueueAudit(() => auditPdf(file, { maxFindings: maxFindings || DEFAULT_MAX_FINDINGS, minSeverity, signal: extra && extra.signal })));
+        } catch (err) {
+          errors.push({ file, error: String(err && err.message || err) });
+        }
       }
-      lines.push('', `${reports.length} PDF${reports.length === 1 ? '' : 's'} audited. Full findings are available with format "json".`);
-      return text(lines.join('\n'));
+      const structured = {
+        count: collected.files.length,
+        succeeded: reports.length,
+        failed: errors.length,
+        truncated: collected.truncated,
+        reports: reports.map((report) => envelope(report)),
+        errors,
+      };
+      if (!reports.length) {
+        return { content: [{ type: 'text', text: `No PDF could be audited.\n${errors.map((entry) => `- ${entry.file}: ${entry.error}`).join('\n')}` }], isError: true, structuredContent: structured };
+      }
+      if (format === 'json') return { content: [{ type: 'text', text: JSON.stringify({ reports, errors }, null, 2) }], structuredContent: structured };
+      if (format === 'csv') return { content: [{ type: 'text', text: [CSV_HEADER, ...reports.map(toCsvRow)].join('\n') }], structuredContent: structured };
+      const lines = ['# PDF accessibility batch', '', '| File | Status | Blocking | Polish | Findings | Critical | Serious | Moderate |', '|---|---:|---:|---:|---:|---:|---:|---:|'];
+      for (const report of reports) {
+        lines.push(`| ${report.file.name} | ${report.summary.status} | ${report.summary.blockingScore} | ${report.summary.polishScore} | ${report.summary.findings} | ${report.summary.critical} | ${report.summary.serious} | ${report.summary.moderate} |`);
+      }
+      lines.push('', `${reports.length} PDF${reports.length === 1 ? '' : 's'} audited${errors.length ? `, ${errors.length} failed to parse` : ''}${collected.truncated ? ` (collection stopped at ${collected.files.length} files)` : ''}. Full findings: format "json".`);
+      if (errors.length) {
+        lines.push('', '## Files that could not be audited', '');
+        for (const entry of errors) lines.push(`- ${entry.file}: ${entry.error}`);
+      }
+      return { content: [{ type: 'text', text: lines.join('\n') }], structuredContent: structured };
     } catch (err) {
       return error(`Batch audit failed: ${err && err.message || err}`);
     }
@@ -160,59 +280,105 @@ export function createServer() {
 
   server.registerTool('explain_finding', {
     title: 'Explain a finding',
-    description: 'Return the rule description, severity, standards mapping and remediation guidance for a rule ID such as pdfua.tagged or figures.missing-alt.',
+    description: 'Return the rule description, severity, tier, standards mapping and remediation guidance for a rule ID such as pdfua.tagged or figures.missing-alt.',
     inputSchema: { ruleId: z.string().describe('Rule ID, for example figures.missing-alt') },
+    outputSchema: {
+      ruleId: z.string(),
+      title: z.string(),
+      category: z.string(),
+      severity: z.string(),
+      tier: z.string(),
+      automated: z.boolean(),
+      summary: z.string(),
+      remediation: z.string().optional(),
+      standards: z.array(z.object({ name: z.string(), ref: z.string() })),
+    },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, async ({ ruleId }) => {
     const content = explainRule(ruleId);
-    return content ? text(content) : error(`Unknown rule: ${ruleId}`);
+    const rule = RULE_BY_ID.get(ruleId);
+    if (!content || !rule) return error(`Unknown rule: ${ruleId}`);
+    return {
+      content: [{ type: 'text', text: content }],
+      structuredContent: {
+        ruleId: rule.id,
+        title: rule.title,
+        category: rule.category,
+        severity: rule.severity,
+        tier: ruleTier(rule.id),
+        automated: true,
+        summary: rule.summary,
+        remediation: rule.remediation,
+        standards: rule.standards || [],
+      },
+    };
   });
 
   server.registerTool('list_checks', {
     title: 'List checks',
-    description: 'List the audit rule catalog, including manual checks. Filter by category, severity or automation status.',
+    description: 'List the audit rule catalog, including manual checks. Filter by category, severity, tier or automation status.',
     inputSchema: {
       category: z.string().optional(),
-      severity: z.enum(['critical', 'serious', 'moderate', 'minor', 'advisory']).optional(),
+      severity: z.enum(SEVERITY_ENUM).optional(),
+      tier: z.enum(['blocking', 'polish', 'info']).optional(),
       automated: z.boolean().optional(),
     },
+    outputSchema: {
+      count: z.number(),
+      checks: z.array(z.object({
+        id: z.string(),
+        title: z.string(),
+        category: z.string(),
+        severity: z.string(),
+        tier: z.string(),
+        automated: z.boolean(),
+      }).passthrough()),
+    },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ category, severity, automated }) => {
-    let rows = RULES.map((rule) => ({ ...rule, automated: true }));
-    if (automated === false) rows = MANUAL_CHECKS.map((rule) => ({ ...rule, automated: false, severity: 'advisory' }));
-    else if (automated !== true) rows = [...rows, ...MANUAL_CHECKS.map((rule) => ({ ...rule, automated: false, severity: 'advisory' }))];
+  }, async ({ category, severity, tier, automated }) => {
+    let rows = RULES.map((rule) => ({ id: rule.id, title: rule.title, category: rule.category, severity: rule.severity, tier: ruleTier(rule.id), automated: true }));
+    if (automated === false) rows = MANUAL_CHECKS.map((rule) => ({ id: rule.id, title: rule.title, category: rule.category, severity: 'advisory', tier: 'info', automated: false }));
+    else if (automated !== true) rows = [...rows, ...MANUAL_CHECKS.map((rule) => ({ id: rule.id, title: rule.title, category: rule.category, severity: 'advisory', tier: 'info', automated: false }))];
     if (category) rows = rows.filter((rule) => rule.category.toLowerCase() === String(category).toLowerCase());
     if (severity) rows = rows.filter((rule) => rule.severity === severity);
-    if (!rows.length) return text('No checks matched.');
-    return text(['| Rule | Category | Severity | Automated | Title |', '|---|---|---|---|---|', ...rows.map((rule) => `| \`${rule.id}\` | ${rule.category} | ${rule.severity} | ${rule.automated ? 'yes' : 'no'} | ${rule.title} |`)].join('\n'));
+    if (tier) rows = rows.filter((rule) => rule.tier === tier);
+    if (!rows.length) return { content: [{ type: 'text', text: 'No checks matched.' }], structuredContent: { count: 0, checks: [] } };
+    const markdown = ['| Rule | Category | Severity | Tier | Automated | Title |', '|---|---|---|---|---|---|', ...rows.map((rule) => `| \`${rule.id}\` | ${rule.category} | ${rule.severity} | ${rule.tier} | ${rule.automated ? 'yes' : 'no'} | ${rule.title} |`)].join('\n');
+    return { content: [{ type: 'text', text: markdown }], structuredContent: { count: rows.length, checks: rows } };
   });
 
   server.registerTool('compare_reports', {
     title: 'Compare two audit reports',
-    description: 'Compare two pdf-a11y-audit JSON reports and list new, fixed and persisting findings plus the score change.',
+    description: 'Compare two pdf-a11y-audit JSON reports for the same document and list new, fixed and persisting rules plus score changes. Refuses to compare different documents unless allowDifferent is true.',
     inputSchema: {
       before: z.string().describe('Path to the earlier JSON report'),
       after: z.string().describe('Path to the later JSON report'),
+      allowDifferent: z.boolean().optional().describe('Allow comparing reports for different documents (default false)'),
     },
+    outputSchema: comparisonSchema.shape,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ before, after }) => {
+  }, async ({ before, after, allowDifferent }) => {
     try {
       const read = async (file) => JSON.parse(await fs.readFile(path.resolve(process.cwd(), file), 'utf8'));
-      const result = compareReports(await read(before), await read(after));
+      const result = compareReports(await read(before), await read(after), { allowDifferent: !!allowDifferent });
+      if (!result.compatible) return { content: [{ type: 'text', text: `Comparison refused: ${result.reason}` }], structuredContent: result, isError: true };
       const lines = [
-        `# Audit comparison`,
+        '# Audit comparison',
         '',
         `${result.before.name} → ${result.after.name}`,
         '',
-        `Score ${result.before.score} → ${result.after.score} (${result.scoreDelta >= 0 ? '+' : ''}${result.scoreDelta})`,
+        `Blocking score ${result.before.blockingScore} → ${result.after.blockingScore} (${result.scoreDelta.blocking >= 0 ? '+' : ''}${result.scoreDelta.blocking}) · polish ${result.before.polishScore} → ${result.after.polishScore} (${result.scoreDelta.polish >= 0 ? '+' : ''}${result.scoreDelta.polish})`,
         '',
-        `New findings: ${result.summary.new} · Fixed: ${result.summary.fixed} · Persisting: ${result.summary.persisting}`,
+        `New rules: ${result.summary.new} · Fixed: ${result.summary.fixed} · Persisting: ${result.summary.persisting}`,
         '',
       ];
       for (const [label, list] of [['New', result.newFindings], ['Fixed', result.fixedFindings], ['Persisting', result.persisting]]) {
         if (!list.length) continue;
         lines.push(`## ${label}`, '');
-        for (const finding of list) lines.push(`- **${finding.title}**${finding.page ? ` (page ${finding.page})` : ''} — \`${finding.ruleId}\``);
+        for (const item of list) {
+          if (label === 'Persisting') lines.push(`- \`${item.ruleId}\` — ${item.occurrencesBefore} → ${item.occurrencesAfter} occurrence(s) (${item.delta >= 0 ? '+' : ''}${item.delta})`);
+          else lines.push(`- \`${item.ruleId}\` — ${item.title}${item.occurrences ? ` (${item.occurrences} occurrence(s))` : ''}`);
+        }
         lines.push('');
       }
       return { content: [{ type: 'text', text: lines.join('\n') }], structuredContent: result };
@@ -223,19 +389,27 @@ export function createServer() {
 
   server.registerTool('render_report', {
     title: 'Render a JSON report as HTML',
-    description: 'Turn an existing pdf-a11y-audit JSON report into the self-contained HTML report.',
+    description: 'Turn an existing pdf-a11y-audit JSON report into the self-contained HTML report. Refuses to replace an existing file unless overwrite is true.',
     inputSchema: {
       report: z.string().describe('Path to a JSON report'),
       output: z.string().optional().describe('HTML output path'),
+      overwrite: z.boolean().optional().describe('Allow replacing an existing file (default false)'),
     },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, async ({ report, output }) => {
+    outputSchema: {
+      output: z.string(),
+      summary: z.object({}).passthrough().optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  }, async ({ report, output, overwrite = false }) => {
     try {
       const json = JSON.parse(await fs.readFile(path.resolve(process.cwd(), report), 'utf8'));
-      const target = output ? path.resolve(process.cwd(), output) : path.join(process.cwd(), `${path.basename(report, '.json')}.html`);
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, renderHtml(json), 'utf8');
-      return text(`HTML report written to ${target}`);
+      if (!json || json.tool !== 'pdf-a11y-audit' || !json.summary) throw new Error('The file is not a pdf-a11y-audit JSON report.');
+      const extension = path.extname(report);
+      const target = await writeTarget(output || path.join(process.cwd(), `${path.basename(report, extension)}.html`), renderHtml(json), overwrite);
+      return {
+        content: [{ type: 'text', text: `HTML report written to ${target}` }],
+        structuredContent: { output: target, summary: json.summary },
+      };
     } catch (err) {
       return error(`Render failed: ${err && err.message || err}`);
     }
@@ -243,13 +417,13 @@ export function createServer() {
 
   server.registerResource('rules', 'remediate://rules', {
     title: 'PDF accessibility audit rules',
-    description: 'The complete rule catalog, including manual checks.',
+    description: 'The complete rule catalog, including tiers and manual checks.',
     mimeType: 'text/markdown',
   }, async () => ({ contents: [{ uri: 'remediate://rules', mimeType: 'text/markdown', text: rulesMarkdown() }] }));
 
   server.registerResource('methodology', 'remediate://methodology', {
-    title: 'Audit methodology and limits',
-    description: 'What the auditor checks, what it cannot check, and how to use the result.',
+    title: 'Audit methodology, scores and limits',
+    description: 'What the auditor checks, what it cannot check, how the two triage scores work and how to use the result.',
     mimeType: 'text/markdown',
   }, async () => ({
     contents: [{
@@ -257,15 +431,36 @@ export function createServer() {
       mimeType: 'text/markdown',
       text: `# pdf-a11y-audit methodology
 
-The auditor reads the PDF object model and the PDF.js text layer locally. It
-checks tagged structure, headings, tables, figures, forms, lists, links, fonts,
-scanned pages, marked-content order and navigation.
+The auditor reads the PDF object model, the structure tree, the parent tree and
+the PDF.js text layer locally. It checks tagged structure, headings, tables,
+figures, forms, lists, links, fonts, scanned pages, marked content, artifact
+nesting, metadata, encryption, XFA and navigation.
 
-It does **not** certify conformance. Colour contrast, alt-text quality, OCR
-accuracy and the meaning of the reading order require a human and a screen
-reader. Every report includes those manual checks and the limitations.
+## Scores
+
+Every report exposes two 0-100 triage scores:
+
+- **blockingScore** subtracts capped penalties for PDF/UA-critical and serious
+  findings (missing tag tree, no text layer, unembedded fonts, untagged content,
+  unnamed form fields, invalid table structure, and so on).
+- **polishScore** subtracts capped penalties for moderate, minor and advisory
+  findings (display title, bookmark quality, list numbering, metadata details).
+
+Each rule contributes at most its cap, grouped root causes are charged once, and
+page-level defects are counted once so score does not depend on page count or on
+how many findings the caller asked to display. Information-only checks are
+reported but never scored, and advisory findings can never round a report to 100.
+
+These are triage scores, not PDF/UA conformance scores. This tool is not a
+PDF/UA validator: use veraPDF or PAC for machine validation, and complete the
+manual checks (contrast, alt-text quality, reading order, OCR accuracy, screen
+reader pass) before making a conformance claim.
+
+## Local only
 
 The audit never uploads a document and never calls a model or a remote API.
+Relative paths resolve against the server working directory; prefer absolute
+paths or pass an explicit output path.
 `,
     }],
   }));
@@ -279,7 +474,7 @@ The audit never uploads a document and never calls a model or a remote API.
       role: 'user',
       content: {
         type: 'text',
-        text: `Audit the local PDF at ${filePath} with pdf-a11y-audit. Group findings by severity and category, identify the five fixes with the highest accessibility impact, and produce a remediation plan with an owner and acceptance criterion for each. Call out the manual checks that must be completed before claiming conformance. Do not claim the document is compliant merely because the automated audit passes.`,
+        text: `Audit the local PDF at ${filePath} with pdf-a11y-audit using format "markdown" or "json". Group findings by blocking and polish tier, identify the five fixes with the highest accessibility impact, and produce a remediation plan with an owner and acceptance criterion for each. Call out the manual checks that must be completed before claiming conformance. Do not claim the document is compliant merely because the automated audit passes: the scores are triage signals, not a conformance certificate.`,
       },
     }],
   }));
@@ -291,5 +486,5 @@ export async function main() {
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`pdf-a11y-audit MCP ${VERSION} ready (local only)`);
+  console.error(`pdf-a11y-audit MCP ${VERSION} ready (local only, cwd: ${process.cwd()})`);
 }

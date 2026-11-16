@@ -1,0 +1,78 @@
+# Publish pdf-a11y-audit to npm with provenance via trusted publishing.
+#
+# One-time owner step before this workflow can publish: on npmjs.com open the
+# package settings for `pdf-a11y-audit`, add a Trusted Publisher for GitHub
+# Actions with organization `Veduis`, repository `pdf-a11y-audit`, workflow
+# `publish-npm.yml` and an empty environment name. The OIDC token issued by
+# this workflow authorises the publish, so no npm token secret is needed.
+# Do not add a long-lived NPM_TOKEN secret as a substitute.
+#
+# Run it by pushing the release tag, or manually from the Actions tab. The
+# workflow skips the publish step when that version already exists on npm.
+
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token for npm trusted publishing and provenance
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "lts/*"
+
+      # No registry token is configured: `npm publish` exchanges the OIDC token
+      # for a short-lived publish credential through the trusted publisher.
+
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - name: Ensure npm supports trusted publishing
+        run: npm install --global npm@^11.5.1
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      # A manual dispatch may publish the current package.json version; a tag
+      # must name exactly that version.
+      - name: Verify the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches package.json version ${version}"
+
+      - name: Check whether this version is already on npm
+        id: check
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "${name}@${version} is already on npm; skipping the publish step."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "${name}@${version} is not on npm yet."
+          fi
+
+      - name: Publish with provenance
+        if: steps.check.outputs.published == 'false'
+        run: npm publish --provenance --access public

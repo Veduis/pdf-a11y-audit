@@ -1,7 +1,9 @@
 /**
- * A self-contained, print-friendly HTML report. No external fonts, images or
- * scripts; the file can be emailed, archived or opened offline.
+ * A self-contained, print-friendly HTML report. No external fonts, images,
+ * scripts or tracking; the file can be emailed, archived or opened offline.
  */
+import { topFixRules } from './report.js';
+
 const SEVERITY_LABEL = {
   critical: 'Critical',
   serious: 'Serious',
@@ -11,9 +13,9 @@ const SEVERITY_LABEL = {
 };
 
 const STATUS_COPY = {
-  fail: 'Not ready to publish',
-  review: 'Needs a manual review',
-  pass: 'No automated blockers',
+  fail: 'Blocking issues found',
+  review: 'Quality issues only',
+  pass: 'No automated findings',
 };
 
 function escapeHtml(value) {
@@ -42,21 +44,27 @@ function shortHash(hash) {
   return hash ? `${hash.slice(0, 12)}…` : '';
 }
 
-function severityClass(severity) {
-  return `severity-${escapeHtml(severity)}`;
-}
-
 function standards(standardsList) {
   return (standardsList || []).map((item) => `<span class="tag">${escapeHtml(item.name)} <span aria-hidden="true">·</span> ${escapeHtml(item.ref)}</span>`).join('');
 }
 
-function findingCard(finding, index) {
-  const evidence = finding.evidence == null ? '' : `<pre class="evidence" tabindex="0" aria-label="Evidence">${escapeHtml(JSON.stringify(finding.evidence, null, 2))}</pre>`;
-  return `<article class="finding" id="finding-${index}">
+function pagesText(finding) {
+  const pages = finding.evidence && Array.isArray(finding.evidence.pages) ? finding.evidence.pages : [];
+  if (pages.length > 1) return `${pages.length} pages`;
+  if (pages.length === 1) return `Page ${pages[0]}`;
+  return finding.page ? `Page ${finding.page}` : '';
+}
+
+function findingCard(finding, id) {
+  const evidence = finding.evidence == null
+    ? ''
+    : `<pre class="evidence" tabindex="0" aria-label="Evidence">${escapeHtml(JSON.stringify(finding.evidence, null, 2))}</pre>`;
+  return `<article class="finding" id="${escapeHtml(id)}">
     <div class="finding-head">
-      <span class="severity ${severityClass(finding.severity)}">${escapeHtml(SEVERITY_LABEL[finding.severity] || finding.severity)}</span>
+      <span class="severity severity-${escapeHtml(finding.severity)}">${escapeHtml(SEVERITY_LABEL[finding.severity] || finding.severity)}</span>
       <h3>${escapeHtml(finding.title)}</h3>
-      ${finding.page ? `<span class="page-ref">Page ${escapeHtml(finding.page)}</span>` : ''}
+      ${pagesText(finding) ? `<span class="page-ref">${escapeHtml(pagesText(finding))}</span>` : ''}
+      ${finding.occurrences && finding.occurrences > 1 ? `<span class="occ">${finding.occurrences} occurrences</span>` : ''}
     </div>
     <p class="finding-message">${escapeHtml(finding.message)}</p>
     ${evidence}
@@ -64,7 +72,7 @@ function findingCard(finding, index) {
       <div><p class="label">How to fix it</p><p>${escapeHtml(finding.remediation)}</p></div>
       <div><p class="label">Standards</p><div class="tags">${standards(finding.standards)}</div></div>
     </div>
-    <p class="rule-id">Rule <code>${escapeHtml(finding.ruleId)}</code></p>
+    <p class="rule-id">Rule <code>${escapeHtml(finding.ruleId)}</code>${finding.tier ? ` · ${escapeHtml(finding.tier)} tier` : ''}</p>
   </article>`;
 }
 
@@ -72,20 +80,34 @@ function countCard(label, value, tone) {
   return `<div class="count ${tone}"><span class="count-value">${Number(value || 0)}</span><span class="count-label">${escapeHtml(label)}</span></div>`;
 }
 
+function scoreTone(score) {
+  if (score >= 90) return 'good';
+  if (score >= 70) return 'fair';
+  return 'poor';
+}
+
 export function renderHtml(report) {
-  const s = report.summary;
-  const status = s.status || 'review';
-  const score = Math.max(0, Math.min(100, Number(s.score || 0)));
-  const rank = { critical: 0, serious: 1, moderate: 2, minor: 3, advisory: 4 };
-  const top = [...report.findings]
-    .sort((a, b) => (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9))
-    .slice(0, 5);
-  const findings = report.findings.map(findingCard).join('');
-  const checks = report.checks.map((check) => `<tr>
+  const summary = report.summary || {};
+  const document = report.document || {};
+  const status = summary.status || 'review';
+  const blocking = Math.max(0, Math.min(100, Number(summary.blockingScore || 0)));
+  const polish = Math.max(0, Math.min(100, Number(summary.polishScore || 0)));
+  const findings = report.findings || [];
+  const top = topFixRules(report, 5);
+  const all = findings.map((finding, index) => findingCard(finding, `finding-${index}`)).join('');
+  const rollup = findings.map((finding) => `<tr>
+    <td><code>${escapeHtml(finding.ruleId)}</code><small>${escapeHtml(finding.title)}</small></td>
+    <td>${escapeHtml(SEVERITY_LABEL[finding.severity] || finding.severity)}</td>
+    <td>${escapeHtml(finding.tier || '')}</td>
+    <td>${Number(finding.occurrences || 1)}</td>
+    <td>${escapeHtml(pagesText(finding) || '—')}</td>
+  </tr>`).join('');
+  const checks = (report.checks || []).map((check) => `<tr>
     <td>${escapeHtml(check.title)}<small>${escapeHtml(check.category)}</small></td>
+    <td>${escapeHtml(check.tier || '')}</td>
     <td><span class="pill status-${escapeHtml(check.status)}">${escapeHtml(check.status)}</span>${check.reason ? `<small>${escapeHtml(check.reason)}</small>` : ''}</td>
   </tr>`).join('');
-  const manual = report.manualChecks.map((check) => `<article class="manual">
+  const manual = (report.manualChecks || []).map((check) => `<article class="manual">
     <div class="manual-mark" aria-hidden="true"></div>
     <div><h3>${escapeHtml(check.title)}</h3><p>${escapeHtml(check.summary)}</p><p class="guidance">${escapeHtml(check.guidance)}</p></div>
   </article>`).join('');
@@ -96,19 +118,19 @@ export function renderHtml(report) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PDF accessibility audit — ${escapeHtml(report.file.name)}</title>
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
+<title>PDF accessibility audit — ${escapeHtml(report.file.name)}</title>
 <style>
 :root{
   --ink:#152033; --navy:#0c1f3a; --paper:#f5f1e8; --panel:#fffdf8; --panel-2:#fbf8f0;
   --line:#d9d2c2; --muted:#596274; --red:#b21f35; --red-bright:#e0243b;
-  --green:#1d6a48; --amber:#8a5200; --critical:#a51f35; --serious:#8f4713;
-  --moderate:#735500; --minor:#3f5368; --advisory:#637184;
+  --critical:#a51f35; --serious:#8f4713; --moderate:#735500; --minor:#3f5368; --advisory:#637184;
   --radius:14px; --shadow:0 20px 50px rgba(12,31,58,.08);
   --header-bg:#0c1f3a; --header-ink:#f7f3e9;
 }
 *{box-sizing:border-box}
-html{scroll-behavior:smooth}
 body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
 a{color:var(--red)}
 a:focus-visible,summary:focus-visible{outline:3px solid var(--red-bright);outline-offset:3px}
@@ -126,13 +148,17 @@ a:focus-visible,summary:focus-visible{outline:3px solid var(--red-bright);outlin
 h1,h2,h3{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;font-weight:600;letter-spacing:-.015em;color:var(--navy)}
 h1{font-size:clamp(30px,4vw,46px);line-height:1.08;margin:0 0 12px;overflow-wrap:anywhere}
 .lede{color:var(--muted);margin:0;max-width:70ch}
-.hero-grid{display:grid;grid-template-columns:minmax(260px,1fr) 2fr;gap:28px;margin-top:30px;align-items:stretch}
-.score{display:flex;align-items:center;gap:20px;border-right:1px solid var(--line);padding-right:28px}
-.score-ring{--pct:${score};width:104px;height:104px;border-radius:50%;background:conic-gradient(var(--navy) calc(var(--pct)*1%),#e7e1d4 0);display:grid;place-items:center;flex:0 0 auto;position:relative}
+.hero-grid{display:grid;grid-template-columns:minmax(280px,1fr) 2fr;gap:28px;margin-top:30px;align-items:stretch}
+.scores{display:flex;gap:22px;border-right:1px solid var(--line);padding-right:28px;align-items:center}
+.score{display:flex;align-items:center;gap:14px}
+.score-ring{--pct:${blocking};width:96px;height:96px;border-radius:50%;background:conic-gradient(var(--navy) calc(var(--pct)*1%),#e7e1d4 0);display:grid;place-items:center;flex:0 0 auto;position:relative}
 .score-ring::after{content:"";position:absolute;inset:9px;border-radius:50%;background:var(--panel)}
-.score-ring span{position:relative;z-index:1;font:700 30px/1 ui-sans-serif,system-ui;color:var(--navy)}
-.score-label{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}
-.score-note{margin:0;font-weight:650;color:var(--navy)}
+.score-ring span{position:relative;z-index:1;font:700 28px/1 ui-sans-serif,system-ui;color:var(--navy)}
+.score-ring.polish{--pct:${polish};width:72px;height:72px}
+.score-ring.polish span{font-size:22px}
+.score-label{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);margin:0 0 4px}
+.score-note{margin:0;font-weight:650;color:var(--navy);font-size:14px}
+.score-model{font-size:12px;color:var(--muted);margin:8px 0 0;max-width:34ch}
 .counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
 .count{background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:2px;min-height:88px;justify-content:flex-end}
 .count-value{font:700 26px/1 ui-sans-serif,system-ui;color:var(--navy)}
@@ -150,7 +176,7 @@ h1{font-size:clamp(30px,4vw,46px);line-height:1.08;margin:0 0 12px;overflow-wrap
 .finding h3{font-size:22px;margin:0;flex:1 1 300px}
 .severity{font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:750;padding:4px 8px;border-radius:5px;color:#fff;background:var(--advisory)}
 .severity-critical{background:var(--critical)}.severity-serious{background:var(--serious)}.severity-moderate{background:var(--moderate)}.severity-minor{background:var(--minor)}.severity-advisory{background:var(--advisory)}
-.page-ref{font-size:12px;color:var(--muted);white-space:nowrap}
+.page-ref,.occ{font-size:12px;color:var(--muted);white-space:nowrap}
 .finding-message{margin:10px 0 12px;max-width:80ch}
 .finding-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:24px;margin-top:14px}
 .finding-grid p{margin:0 0 6px;max-width:75ch}
@@ -166,6 +192,7 @@ th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vert
 th{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);background:var(--panel-2)}
 tr:last-child td{border-bottom:0}
 td small{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+td code{background:var(--panel-2);padding:1px 4px;border-radius:3px}
 .pill{display:inline-block;padding:3px 8px;border-radius:999px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:700}
 .status-pass{background:#e3f0e8;color:#16573a}.status-fail{background:#f8e7e9;color:#8a1b2c}.status-skipped{background:#ece8dd;color:#5a574e}
 .manual{display:flex;gap:14px;border-top:1px solid var(--line);padding:18px 0}
@@ -182,9 +209,10 @@ summary{cursor:pointer;font-weight:650;color:var(--navy)}
 .footer{margin-top:34px;border-top:1px solid var(--line);padding-top:20px;color:var(--muted);font-size:13px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}
 .footer strong{color:var(--navy)}
 .empty{padding:20px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}
-@media (max-width:760px){
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+@media (max-width:820px){
   .site-header{padding:18px}.header-meta{display:none}.wrap{padding:22px 14px 44px}
-  .hero,.panel{padding:22px}.hero-grid{grid-template-columns:1fr}.score{border-right:0;border-bottom:1px solid var(--line);padding:0 0 20px}
+  .hero,.panel{padding:22px}.hero-grid{grid-template-columns:1fr}.scores{border-right:0;border-bottom:1px solid var(--line);padding:0 0 20px;flex-wrap:wrap}
   .counts{grid-template-columns:repeat(2,minmax(0,1fr))}.finding-grid{grid-template-columns:1fr}
   .facts{grid-template-columns:1fr}.facts div{grid-template-columns:120px 1fr}
 }
@@ -194,7 +222,7 @@ summary{cursor:pointer;font-weight:650;color:var(--navy)}
   .finding,.manual{break-inside:avoid}.footer{color:#000}
 }
 @media (prefers-color-scheme:dark){
-  :root{--ink:#e8e4d8;--navy:#f4f0e5;--paper:#121820;--panel:#19212b;--panel-2:#202a35;--line:#33404e;--muted:#a9b3bf;--red:#ff7f8d;--red-bright:#ff9aa5;--green:#83d3a5;--amber:#f2c07a;--critical:#ff8b9a;--serious:#f0a36a;--moderate:#e6c56d;--minor:#b8c7d9;--advisory:#aab7c6;--shadow:0 20px 50px rgba(0,0,0,.3)}
+  :root{--ink:#e8e4d8;--navy:#f4f0e5;--paper:#121820;--panel:#19212b;--panel-2:#202a35;--line:#33404e;--muted:#a9b3bf;--red:#ff7f8d;--red-bright:#ff9aa5;--critical:#ff8b9a;--serious:#f0a36a;--moderate:#e6c56d;--minor:#b8c7d9;--advisory:#aab7c6;--shadow:0 20px 50px rgba(0,0,0,.3)}
   .evidence{background:#10161d}.status-fail{background:#3a1d23;color:#ffb6bf}.status-review{background:#3a301a;color:#f5d28b}.status-pass{background:#173528;color:#9fe0ba}
   .severity{color:#101820}
   .tag{background:#202a35}.score-ring::after{background:var(--panel)}
@@ -209,37 +237,51 @@ summary{cursor:pointer;font-weight:650;color:var(--navy)}
     <span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32" role="img"><rect width="32" height="32" rx="9.5" fill="#0C1F3A"/><path d="M10 25V7" stroke="#E0243B" stroke-width="3.2" stroke-linecap="round"/><path d="M10 7h5.6a5 5 0 010 10H10" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M15.9 17 22 25" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg></span>
     <span>Remediate</span>
   </div>
-  <div class="header-meta">PDF accessibility audit<br>Local report</div>
+  <div class="header-meta">PDF accessibility triage<br>Local report</div>
 </header>
 <main id="main" class="wrap">
-  <section class="hero">
+  <section class="hero" aria-labelledby="report-title">
     <p class="eyebrow">Document audit · ${escapeHtml(formatDate(report.generatedAt))}</p>
-    <h1>${escapeHtml(report.file.name)}</h1>
-    <p class="lede">${report.document.pageCount} pages · ${formatBytes(report.file.bytes)} · SHA-256 ${escapeHtml(shortHash(report.file.sha256))}</p>
+    <h1 id="report-title">${escapeHtml(report.file.name)}</h1>
+    <p class="lede">${document.pageCount} pages · ${formatBytes(report.file.bytes)} · SHA-256 ${escapeHtml(shortHash(report.file.sha256))} · score model ${escapeHtml(report.scoreModel || 'triage-2')}</p>
     <div class="hero-grid">
-      <div class="score">
-        <div class="score-ring" role="img" aria-label="Accessibility score ${score} out of 100"><span>${score}</span></div>
-        <div><p class="score-label">Accessibility score</p><p class="score-note">${escapeHtml(STATUS_COPY[status] || status)}</p><span class="status status-${escapeHtml(status)}">${escapeHtml(status)}</span></div>
+      <div class="scores">
+        <div class="score">
+          <div class="score-ring" role="img" aria-label="Blocking score ${blocking} out of 100"><span>${blocking}</span></div>
+          <div><p class="score-label">Blocking score</p><p class="score-note">${escapeHtml(STATUS_COPY[status] || status)}</p></div>
+        </div>
+        <div class="score">
+          <div class="score-ring polish" role="img" aria-label="Polish score ${polish} out of 100"><span>${polish}</span></div>
+          <div><p class="score-label">Polish score</p><p class="score-note">${findings.length} rule${findings.length === 1 ? '' : 's'} to review</p></div>
+        </div>
+        <span class="status status-${escapeHtml(status)}">${escapeHtml(status)}</span>
       </div>
       <div class="counts">
-        ${countCard('Critical', s.critical, 'critical')}
-        ${countCard('Serious', s.serious, 'serious')}
-        ${countCard('Moderate', s.moderate, 'moderate')}
-        ${countCard('Advisory', s.advisory, 'advisory')}
+        ${countCard('Critical', summary.critical, 'critical')}
+        ${countCard('Serious', summary.serious, 'serious')}
+        ${countCard('Moderate', summary.moderate, 'moderate')}
+        ${countCard('Advisory', summary.advisory, 'advisory')}
       </div>
     </div>
+    <p class="score-model">Triage scores only. A blocking score is not a PDF/UA conformance score; use veraPDF or PAC plus a screen reader for conformance decisions.</p>
   </section>
 
   <section class="panel" aria-labelledby="first-heading">
     <h2 id="first-heading">What to fix first</h2>
-    <p class="panel-intro">The highest-impact findings, ordered by severity. Each includes the evidence the audit found and the remediation step.</p>
-    ${top.length ? top.map((finding, index) => findingCard(finding, `top-${index}`)).join('') : '<div class="empty">No automated findings. Continue with the manual checks below.</div>'}
+    <p class="panel-intro">The highest-impact findings, one card per rule (severity sorted, duplicates collapsed). Each includes the evidence the audit found and the remediation step.</p>
+    ${top.length ? top.map((finding, index) => findingCard({ ...finding, occurrences: finding.occurrences || 1 }, `top-${index}`)).join('') : '<div class="empty">No automated findings. Continue with the manual checks below.</div>'}
+  </section>
+
+  <section class="panel" aria-labelledby="rollup-heading">
+    <h2 id="rollup-heading">Findings by rule</h2>
+    <p class="panel-intro">Every failed rule with its severity, tier and number of occurrences.</p>
+    ${rollup ? `<div class="table-wrap" tabindex="0" role="region" aria-label="Findings by rule"><table><caption class="sr-only">Findings by rule</caption><thead><tr><th scope="col">Rule</th><th scope="col">Severity</th><th scope="col">Tier</th><th scope="col">Occurrences</th><th scope="col">Pages</th></tr></thead><tbody>${rollup}</tbody></table></div>` : '<div class="empty">No automated findings.</div>'}
   </section>
 
   <section class="panel" aria-labelledby="all-heading">
     <h2 id="all-heading">All findings</h2>
-    <p class="panel-intro">${report.findings.length} automated finding${report.findings.length === 1 ? '' : 's'} across ${report.checks.filter((check) => check.status === 'fail').length} checks. Skipped checks are listed in the check register below.</p>
-    ${findings || '<div class="empty">No automated findings.</div>'}
+    <p class="panel-intro">${findings.length} rule finding${findings.length === 1 ? '' : 's'} (${summary.occurrences} occurrences).</p>
+    ${all || '<div class="empty">No automated findings.</div>'}
   </section>
 
   <section class="panel" aria-labelledby="manual-heading">
@@ -248,47 +290,63 @@ summary{cursor:pointer;font-weight:650;color:var(--navy)}
     ${manual}
   </section>
 
+  <section class="panel" aria-labelledby="method-heading">
+    <h2 id="method-heading">How the scores work</h2>
+    <p class="panel-intro">No mystery score: the two numbers are capped penalties over the findings below.</p>
+    <ul>
+      <li>The <strong>blocking score</strong> starts at 100 and subtracts penalties for PDF/UA-critical and serious rules; the <strong>polish score</strong> covers moderate, minor and advisory rules.</li>
+      <li>Each rule contributes at most its cap (a systemic defect is charged once, not once per instance), grouped root causes are charged once, and page-level defects are counted once so longer documents are not punished twice.</li>
+      <li>Information-only checks are reported but never scored. Advisory findings can never round a report up to 100.</li>
+      <li>The scores are triage signals. They are not PDF/UA conformance scores and cannot certify accessibility.</li>
+    </ul>
+  </section>
+
   <section class="panel" aria-labelledby="facts-heading">
     <h2 id="facts-heading">Document facts</h2>
     <dl class="facts">
-      <div><dt>Title</dt><dd>${escapeHtml(report.document.title || 'Missing')}</dd></div>
-      <div><dt>Language</dt><dd>${escapeHtml(report.document.language || 'Missing')}</dd></div>
-      <div><dt>Tagged</dt><dd>${report.document.tagged ? 'Yes' : 'No'}</dd></div>
-      <div><dt>Marked content</dt><dd>${report.document.marked ? 'Yes' : 'No'}</dd></div>
-      <div><dt>PDF/UA claim</dt><dd>${report.document.pdfuaClaim ? 'Yes' : 'No'}</dd></div>
-      <div><dt>Display title</dt><dd>${report.document.displayDocTitle ? 'Yes' : 'No'}</dd></div>
-      <div><dt>Pages</dt><dd>${report.document.pageCount}</dd></div>
-      <div><dt>Scanned pages</dt><dd>${report.document.pagesScanned}</dd></div>
-      <div><dt>Fonts</dt><dd>${report.document.fonts}</dd></div>
-      <div><dt>Form fields</dt><dd>${report.document.formFields}</dd></div>
-      <div><dt>Outline entries</dt><dd>${report.document.outlineEntries}</dd></div>
-      <div><dt>Author</dt><dd>${escapeHtml(report.document.author || 'Not set')}</dd></div>
+      <div><dt>Title</dt><dd>${escapeHtml(document.title || 'Missing')}</dd></div>
+      <div><dt>XMP title</dt><dd>${escapeHtml(document.xmpTitle || 'Missing')}</dd></div>
+      <div><dt>Language</dt><dd>${escapeHtml(document.language || 'Missing')}</dd></div>
+      <div><dt>Tagged</dt><dd>${document.tagged ? 'Yes' : 'No'}</dd></div>
+      <div><dt>Marked content</dt><dd>${document.marked ? 'Yes' : 'No'}</dd></div>
+      <div><dt>Parent tree</dt><dd>${document.parentTree ? 'Yes' : 'No'}</dd></div>
+      <div><dt>PDF/UA claim</dt><dd>${document.pdfuaClaim ? 'Yes' : 'No'}</dd></div>
+      <div><dt>Display title</dt><dd>${document.displayDocTitle ? 'Yes' : 'No'}</dd></div>
+      <div><dt>Pages</dt><dd>${document.pageCount}</dd></div>
+      <div><dt>Scanned pages</dt><dd>${document.pagesScanned}</dd></div>
+      <div><dt>Fonts</dt><dd>${document.fonts}</dd></div>
+      <div><dt>Form fields</dt><dd>${document.formFields}</dd></div>
+      <div><dt>Outline entries</dt><dd>${document.outlineEntries}</dd></div>
+      <div><dt>Header version</dt><dd>${escapeHtml(document.headerVersion || 'Missing')}</dd></div>
+      <div><dt>Encrypted</dt><dd>${document.encrypted ? 'Yes' : 'No'}</dd></div>
+      <div><dt>XFA</dt><dd>${document.xfa && document.xfa.present ? (document.xfa.dynamic ? 'Dynamic' : 'Static') : 'Absent'}</dd></div>
+      <div><dt>Author</dt><dd>${escapeHtml(document.author || 'Not set')}</dd></div>
     </dl>
   </section>
 
   <section class="panel" aria-labelledby="checks-heading">
     <h2 id="checks-heading">Check register</h2>
-    <p class="panel-intro">Every automated check, including the ones skipped because the document has no tag tree.</p>
+    <p class="panel-intro">Every automated check, including the ones skipped because the document has no tag tree or the check does not apply.</p>
     <details open>
-      <summary>Show all ${report.checks.length} checks</summary>
+      <summary>Show all ${(report.checks || []).length} checks</summary>
       <div class="table-wrap" style="margin-top:14px" tabindex="0" role="region" aria-label="Automated check register">
-        <table><caption class="sr-only">Automated checks</caption><thead><tr><th scope="col">Check</th><th scope="col">Status</th></tr></thead><tbody>${checks}</tbody></table>
+        <table><caption class="sr-only">Automated checks</caption><thead><tr><th scope="col">Check</th><th scope="col">Tier</th><th scope="col">Status</th></tr></thead><tbody>${checks}</tbody></table>
       </div>
     </details>
   </section>
 
   <section class="panel" aria-labelledby="limits-heading">
     <h2 id="limits-heading">Method and limits</h2>
-    <p class="panel-intro">This report was generated locally from the PDF object model and the PDF.js text layer. No document was uploaded.</p>
+    <p class="panel-intro">This report was generated locally from the PDF object model, the parent tree and the PDF.js text layer. No document was uploaded.</p>
     <ul>
-      ${report.limitations.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
+      ${(report.limitations || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
     </ul>
-    <p class="rule-id">Generated by <strong>${escapeHtml(report.tool)} ${escapeHtml(report.version)}</strong> on ${escapeHtml(formatDate(report.generatedAt))}. ${report.checks.filter((check) => check.status === 'pass').length} checks passed, ${report.checks.filter((check) => check.status === 'fail').length} failed, ${report.checks.filter((check) => check.status === 'skipped').length} skipped.</p>
+    <p class="rule-id">Generated by <strong>${escapeHtml(report.tool)} ${escapeHtml(report.version)}</strong> on ${escapeHtml(formatDate(report.generatedAt))}. ${(report.checks || []).filter((check) => check.status === 'pass').length} checks passed, ${(report.checks || []).filter((check) => check.status === 'fail').length} failed, ${(report.checks || []).filter((check) => check.status === 'skipped').length} skipped.</p>
   </section>
 
   <footer class="footer">
     <span><strong>Remediate</strong> · PDF remediation and accessible publishing for public-sector teams.</span>
-    <a href="https://remediatepdf.com/pdf-remediation?utm_source=pdf-a11y-audit&amp;utm_medium=html_report">Run this audit on your own documents</a>
+    <span>pdf-a11y-audit ${escapeHtml(report.version)} · triage only</span>
   </footer>
 </main>
 <script type="application/json" id="audit-data">${data}</script>

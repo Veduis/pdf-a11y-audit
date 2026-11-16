@@ -3,7 +3,41 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { PDFDocument, PDFName, PDFString } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFString, PDFNumber } from 'pdf-lib';
+
+const XMP_TITLE = (title) => `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:pdfuaid="http://www.aiim.org/pdfua/ns/id/">
+   <dc:title><rdf:Alt><rdf:li xml:lang="x-default">${title}</rdf:li></rdf:Alt></dc:title>
+   <pdfuaid:part>1</pdfuaid:part>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>`;
+
+function setMetadata(doc, title, { compress = false } = {}) {
+  const ctx = doc.context;
+  const dict = { Type: PDFName.of('Metadata'), Subtype: PDFName.of('XML') };
+  const stream = compress ? ctx.flateStream(XMP_TITLE(title), dict) : ctx.stream(XMP_TITLE(title), dict);
+  doc.catalog.set(PDFName.of('Metadata'), ctx.register(stream));
+}
+
+function structElem(ctx, { role, parent, page, k, alt, actualText, title, id, attrs }) {
+  const dict = {
+    Type: PDFName.of('StructElem'),
+    S: PDFName.of(role),
+    ...(parent ? { P: parent } : {}),
+    ...(page ? { Pg: page.ref } : {}),
+    ...(k === undefined ? {} : { K: k }),
+    ...(alt === undefined ? {} : { Alt: PDFString.of(alt) }),
+    ...(actualText === undefined ? {} : { ActualText: PDFString.of(actualText) }),
+    ...(title === undefined ? {} : { T: PDFString.of(title) }),
+    ...(id === undefined ? {} : { ID: PDFString.of(id) }),
+    ...(attrs ? { A: ctx.obj(attrs) } : {}),
+  };
+  return ctx.register(ctx.obj(dict));
+}
 
 function fontResources(ctx) {
   return ctx.obj({
@@ -98,6 +132,7 @@ function contentStream(good) {
 async function makeTagged(good) {
   const doc = await PDFDocument.create();
   doc.setTitle('Tagged accessibility fixture');
+  if (good) setMetadata(doc, 'Tagged accessibility fixture');
   const page = doc.addPage([612, 792]);
   const ctx = doc.context;
   page.node.set(PDFName.of('Resources'), fontResources(ctx));
@@ -135,6 +170,136 @@ async function makeTagged(good) {
   return doc.save();
 }
 
+
+function basePageDoc(doc, { title, withResources = true, tabs = true } = {}) {
+  if (title) doc.setTitle(title);
+  const page = doc.addPage([612, 792]);
+  const ctx = doc.context;
+  if (withResources) page.node.set(PDFName.of('Resources'), fontResources(ctx));
+  page.node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream('q Q')));
+  page.node.set(PDFName.of('StructParents'), PDFNumber.of(0));
+  if (tabs) page.node.set(PDFName.of('Tabs'), PDFName.of('S'));
+  doc.catalog.set(PDFName.of('MarkInfo'), ctx.obj({ Marked: true }));
+  doc.catalog.set(PDFName.of('Lang'), PDFString.of('en-US'));
+  doc.catalog.set(PDFName.of('ViewerPreferences'), ctx.obj({ DisplayDocTitle: true }));
+  const root = ctx.obj({ Type: PDFName.of('StructTreeRoot'), RoleMap: ctx.obj({}) });
+  const rootRef = ctx.register(root);
+  doc.catalog.set(PDFName.of('StructTreeRoot'), rootRef);
+  return { page, ctx, root, rootRef };
+}
+
+async function makeMarkedContent({ orphan = false } = {}) {
+  const doc = await PDFDocument.create();
+  const { page, ctx, root, rootRef } = basePageDoc(doc, { title: 'Marked content fixture' });
+  const lines = [
+    'q',
+    'BT /F1 12 Tf 72 700 Td',
+    '/Artifact <</MCID 0>> BDC',
+    '(Confidential footer) Tj',
+    'EMC',
+    '/P <</MCID 1>> BDC',
+    '(Tagged body text) Tj',
+    'EMC',
+    ...(orphan ? ['/Content <</MCID 2>> BDC', '(Orphan text) Tj', 'EMC'] : []),
+    'ET',
+    'Q',
+  ];
+  page.node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream(lines.join('\n'))));
+  const p = structElem(ctx, { role: 'P', parent: rootRef, page, k: 1 });
+  const artifact = structElem(ctx, { role: 'Artifact', parent: rootRef, page, k: 0 });
+  root.set(PDFName.of('K'), ctx.obj([p]));
+  const entries = ctx.obj([artifact, p]);
+  root.set(PDFName.of('ParentTree'), ctx.register(ctx.obj({ Nums: [0, entries] })));
+  return doc.save();
+}
+
+async function makeFormTree() {
+  const doc = await PDFDocument.create();
+  const { page, ctx, root, rootRef } = basePageDoc(doc, { title: 'Form tree fixture', withResources: false });
+  const form = structElem(ctx, { role: 'Form', parent: rootRef, page });
+  root.set(PDFName.of('K'), ctx.obj([form]));
+  const widgets = [1, 2].map((index) => {
+    const dict = ctx.obj({
+      Type: PDFName.of('Annot'),
+      Subtype: PDFName.of('Widget'),
+      FT: PDFName.of('Tx'),
+      T: PDFString.of(`f1_0${index}[0]`),
+      Rect: ctx.obj([72, 700 - index * 30, 300, 720 - index * 30]),
+      P: page.ref,
+      StructParent: PDFNumber.of(index),
+    });
+    return { ref: ctx.register(dict), dict };
+  });
+  page.node.set(PDFName.of('Annots'), ctx.obj(widgets.map((widget) => widget.ref)));
+  const nestedWidgetArray = ctx.obj(widgets.map((widget) => widget.ref));
+  const pageField = ctx.register(ctx.obj({ T: PDFString.of('Page1[0]'), Kids: ctx.obj([nestedWidgetArray]) }));
+  const top = ctx.register(ctx.obj({ T: PDFString.of('topmostSubform[0]'), Kids: ctx.obj([ctx.obj([pageField])]) }));
+  doc.catalog.set(PDFName.of('AcroForm'), ctx.obj({ Fields: ctx.obj([top]) }));
+  root.set(PDFName.of('ParentTree'), ctx.register(ctx.obj({ Nums: [0, ctx.obj([]), 1, form, 2, form] })));
+  return doc.save();
+}
+
+async function makeTableFixture(kind) {
+  const doc = await PDFDocument.create();
+  const { ctx, root, rootRef } = basePageDoc(doc, { title: `${kind} table fixture`, withResources: false });
+  if (kind === 'headers-id') {
+    const row1 = ctx.register(ctx.obj({ Type: PDFName.of('StructElem'), S: PDFName.of('TR') }));
+    const row2 = ctx.register(ctx.obj({ Type: PDFName.of('StructElem'), S: PDFName.of('TR') }));
+    const h1 = structElem(ctx, { role: 'TH', parent: row1, actualText: 'Column A', id: 'h1' });
+    const h2 = structElem(ctx, { role: 'TH', parent: row1, actualText: 'Column B', id: 'h2' });
+    const d1 = structElem(ctx, { role: 'TD', parent: row2, attrs: { O: PDFName.of('Table'), Headers: [PDFString.of('h1')] } });
+    const d2 = structElem(ctx, { role: 'TD', parent: row2, attrs: { O: PDFName.of('Table'), Headers: [PDFString.of('h2')] } });
+    ctx.lookup(row1).set(PDFName.of('P'), rootRef); ctx.lookup(row1).set(PDFName.of('K'), ctx.obj([h1, h2]));
+    ctx.lookup(row2).set(PDFName.of('P'), rootRef); ctx.lookup(row2).set(PDFName.of('K'), ctx.obj([d1, d2]));
+    const table = structElem(ctx, { role: 'Table', parent: rootRef, k: [row1, row2] });
+    root.set(PDFName.of('K'), ctx.obj([table]));
+  } else {
+    const row1 = ctx.register(ctx.obj({ Type: PDFName.of('StructElem'), S: PDFName.of('TR') }));
+    const row2 = ctx.register(ctx.obj({ Type: PDFName.of('StructElem'), S: PDFName.of('TR') }));
+    const h1 = structElem(ctx, { role: 'TH', parent: row1, actualText: 'Group A', attrs: { O: PDFName.of('Table'), ColSpan: PDFNumber.of(2) } });
+    const h2 = structElem(ctx, { role: 'TH', parent: row1, actualText: 'Group B', attrs: { O: PDFName.of('Table'), ColSpan: PDFNumber.of(2) } });
+    const d1 = structElem(ctx, { role: 'TD', parent: row2, attrs: { O: PDFName.of('Table'), ColSpan: PDFNumber.of(4) } });
+    ctx.lookup(row1).set(PDFName.of('P'), rootRef); ctx.lookup(row1).set(PDFName.of('K'), ctx.obj([h1, h2]));
+    ctx.lookup(row2).set(PDFName.of('P'), rootRef); ctx.lookup(row2).set(PDFName.of('K'), ctx.obj([d1]));
+    const table = structElem(ctx, { role: 'Table', parent: rootRef, k: [row1, row2] });
+    root.set(PDFName.of('K'), ctx.obj([table]));
+  }
+  root.set(PDFName.of('ParentTree'), ctx.register(ctx.obj({ Nums: [0, ctx.obj([])] })));
+  return doc.save();
+}
+
+async function makeStrongH() {
+  const doc = await PDFDocument.create();
+  const { page, ctx, root, rootRef } = basePageDoc(doc, { title: 'Strong heading fixture' });
+  page.node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream('q BT /F1 16 Tf 72 720 Td /H <</MCID 0>> BDC (Chapter one) Tj EMC ET Q')));
+  const h = structElem(ctx, { role: 'H', parent: rootRef, page, k: 0 });
+  root.set(PDFName.of('K'), ctx.obj([h]));
+  root.set(PDFName.of('ParentTree'), ctx.register(ctx.obj({ Nums: [0, ctx.obj([h])] })));
+  return doc.save();
+}
+
+async function makeXmpFixture({ compress = false, infoTitle = false } = {}) {
+  const doc = await PDFDocument.create();
+  doc.addPage([612, 792]);
+  if (infoTitle) doc.setTitle('Metadata fixture');
+  setMetadata(doc, 'Metadata fixture', { compress });
+  return doc.save();
+}
+
+async function makeClean() {
+  const doc = await PDFDocument.create();
+  const { page, ctx, root, rootRef } = basePageDoc(doc, { title: 'Clean fixture', withResources: false });
+  page.node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream('q 0 0 1 1 re f Q')));
+  const h1 = structElem(ctx, { role: 'H1', parent: rootRef, actualText: 'Clean fixture title' });
+  const figure = structElem(ctx, { role: 'Figure', parent: rootRef, alt: 'A decorative rule.' });
+  root.set(PDFName.of('K'), ctx.obj([h1, figure]));
+  root.set(PDFName.of('ParentTree'), ctx.register(ctx.obj({ Nums: [0, ctx.obj([])] })));
+  root.set(PDFName.of('RoleMap'), ctx.obj({}));
+  setMetadata(doc, 'Clean fixture');
+  doc.catalog.set(PDFName.of('ViewerPreferences'), ctx.obj({ DisplayDocTitle: true }));
+  return doc.save();
+}
+
 export async function makeFixtures(dir) {
   await fs.mkdir(dir, { recursive: true });
   const untaggedDoc = await PDFDocument.create();
@@ -152,10 +317,28 @@ export async function makeFixtures(dir) {
     taggedGood: path.join(dir, 'tagged-good.pdf'),
     taggedBad: path.join(dir, 'tagged-bad.pdf'),
     scanned: path.join(dir, 'scanned.pdf'),
+    artifact: path.join(dir, 'artifact.pdf'),
+    orphan: path.join(dir, 'orphan.pdf'),
+    formTree: path.join(dir, 'form-tree.pdf'),
+    headersId: path.join(dir, 'headers-id.pdf'),
+    spans: path.join(dir, 'spans.pdf'),
+    strongH: path.join(dir, 'strong-h.pdf'),
+    xmpOnlyTitle: path.join(dir, 'xmp-only-title.pdf'),
+    compressedXmp: path.join(dir, 'compressed-xmp.pdf'),
+    clean: path.join(dir, 'clean.pdf'),
   };
   await fs.writeFile(files.untagged, await untaggedDoc.save());
   await fs.writeFile(files.taggedGood, await makeTagged(true));
   await fs.writeFile(files.taggedBad, await makeTagged(false));
   await fs.writeFile(files.scanned, await scannedDoc.save());
+  await fs.writeFile(files.artifact, await makeMarkedContent({}));
+  await fs.writeFile(files.orphan, await makeMarkedContent({ orphan: true }));
+  await fs.writeFile(files.formTree, await makeFormTree());
+  await fs.writeFile(files.headersId, await makeTableFixture('headers-id'));
+  await fs.writeFile(files.spans, await makeTableFixture('spans'));
+  await fs.writeFile(files.strongH, await makeStrongH());
+  await fs.writeFile(files.xmpOnlyTitle, await makeXmpFixture({}));
+  await fs.writeFile(files.compressedXmp, await makeXmpFixture({ compress: true, infoTitle: true }));
+  await fs.writeFile(files.clean, await makeClean());
   return files;
 }

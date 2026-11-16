@@ -27,50 +27,109 @@ test.after(async () => {
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
-test('MCP exposes the audit tools, resources and prompt', async () => {
+test('MCP exposes six tools with output schemas, resources and a prompt', async () => {
   const tools = await client.listTools();
   const names = tools.tools.map((tool) => tool.name);
   for (const name of ['audit_pdf', 'audit_batch', 'explain_finding', 'list_checks', 'compare_reports', 'render_report']) {
     assert.ok(names.includes(name), `missing tool ${name}`);
   }
   const byName = Object.fromEntries(tools.tools.map((tool) => [tool.name, tool]));
-  assert.equal(byName.audit_pdf.annotations.readOnlyHint, false, 'audit_pdf can write a report');
-  assert.equal(byName.render_report.annotations.readOnlyHint, false, 'render_report writes HTML');
-  assert.equal(byName.audit_batch.annotations.readOnlyHint, true, 'audit_batch only reads');
+  for (const name of names) assert.ok(byName[name].outputSchema, `${name} declares an outputSchema`);
+  assert.equal(byName.audit_pdf.annotations.readOnlyHint, false);
+  assert.equal(byName.audit_pdf.annotations.destructiveHint, true, 'audit_pdf can write or replace a file');
+  assert.equal(byName.audit_batch.annotations.readOnlyHint, true);
   const resources = await client.listResources();
   assert.ok(resources.resources.some((resource) => resource.uri === 'remediate://rules'));
+  assert.ok(resources.resources.some((resource) => resource.uri === 'remediate://methodology'));
   const prompts = await client.listPrompts();
   assert.ok(prompts.prompts.some((prompt) => prompt.name === 'audit_and_plan'));
 });
 
-test('audit_pdf returns a structured report', async () => {
-  const result = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'json' } });
+test('server instructions explain the triage scores and local-only behaviour', async () => {
+  const instructions = client.getInstructions ? client.getInstructions() : '';
+  const text = String(instructions || '');
+  if (text) {
+    assert.match(text, /triage/i);
+    assert.match(text, /never uploads/i);
+  }
+});
+
+test('audit_pdf defaults to a compact summary with a structured envelope', async () => {
+  const result = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad } });
+  const text = result.content.map((part) => part.text || '').join('\n');
+  assert.match(text, /Blocking score/);
+  assert.ok(text.length < 4000, `default output should be compact, got ${text.length} characters`);
+  assert.ok(result.structuredContent && result.structuredContent.summary);
+  assert.equal(result.structuredContent.summary.score, result.structuredContent.summary.blockingScore);
+  assert.equal(result.structuredContent.summary.scoreModel, 'triage-2');
+});
+
+test('audit_pdf json returns the full report and the score is cap-independent', async () => {
+  const result = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'json', maxFindings: 1 } });
   const report = JSON.parse(result.content[0].text);
   assert.equal(report.tool, 'pdf-a11y-audit');
-  assert.equal(report.document.tagged, true);
-  assert.ok(report.findings.some((finding) => finding.ruleId === 'figures.missing-alt'));
+  assert.equal(report.scoreModel, 'triage-2');
+  assert.equal(report.summary.blockingScore, result.structuredContent.summary.blockingScore);
+  assert.ok(report.summary.occurrences >= report.summary.findings);
 });
 
-test('explain_finding and list_checks are useful without a document', async () => {
+test('audit_pdf refuses to overwrite and accepts overwrite:true', async () => {
+  const target = path.join(tmp, 'guarded-report.html');
+  const first = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'html', output: target } });
+  assert.match(first.content[0].text, /HTML report/);
+  const second = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'html', output: target } });
+  assert.equal(second.isError, true);
+  assert.match(second.content[0].text, /Refusing to overwrite/);
+  const third = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'html', output: target, overwrite: true } });
+  assert.notEqual(third.isError, true);
+  const html = await fs.readFile(target, 'utf8');
+  assert.match(html, /Blocking score/);
+});
+
+test('audit_batch fails soft on a corrupt PDF', async () => {
+  const corrupt = path.join(tmp, 'corrupt.pdf');
+  await fs.writeFile(corrupt, 'not a pdf at all');
+  const result = await client.callTool({ name: 'audit_batch', arguments: { paths: [tmp] } });
+  const text = result.content[0].text;
+  assert.match(text, /could not be audited/i);
+  assert.equal(result.structuredContent.failed, 1);
+  assert.ok(result.structuredContent.succeeded >= 1);
+  assert.ok(result.structuredContent.reports.length >= 1);
+});
+
+test('explain_finding and list_checks expose structured rule data', async () => {
   const explained = await client.callTool({ name: 'explain_finding', arguments: { ruleId: 'figures.missing-alt' } });
   assert.match(explained.content[0].text, /Figure has no alternative text/);
-  const checks = await client.callTool({ name: 'list_checks', arguments: { automated: true, severity: 'critical' } });
-  assert.match(checks.content[0].text, /pdfua\.tagged/);
+  assert.equal(explained.structuredContent.tier, 'blocking');
+  const checks = await client.callTool({ name: 'list_checks', arguments: { tier: 'blocking', severity: 'critical' } });
+  assert.ok(checks.structuredContent.count > 0);
+  for (const entry of checks.structuredContent.checks) {
+    assert.equal(entry.tier, 'blocking');
+    assert.equal(entry.severity, 'critical');
+  }
 });
 
-test('audit_batch and render_report work together', async () => {
-  const batch = await client.callTool({ name: 'audit_batch', arguments: { paths: [tmp], format: 'markdown' } });
-  assert.match(batch.content[0].text, /PDF accessibility batch/);
-  assert.match(batch.content[0].text, /tagged-bad\.pdf/);
+test('compare_reports refuses different documents and compares matching ones', async () => {
+  const reportPath = path.join(tmp, 'before.json');
+  const first = await client.callTool({ name: 'audit_pdf', arguments: { path: files.orphan, format: 'json', output: reportPath } });
+  assert.notEqual(first.isError, true);
+  const same = await client.callTool({ name: 'audit_pdf', arguments: { path: files.orphan, format: 'json', output: reportPath, overwrite: true } });
+  assert.notEqual(same.isError, true);
+  const compared = await client.callTool({ name: 'compare_reports', arguments: { before: reportPath, after: reportPath } });
+  assert.match(compared.content[0].text, /Audit comparison/);
+  assert.equal(compared.structuredContent.compatible, true);
+  const mismatch = await client.callTool({ name: 'compare_reports', arguments: { before: reportPath, after: path.join(tmp, 'other.json') } });
+  assert.equal(mismatch.isError, true);
+});
 
-  const jsonPath = path.join(tmp, 'tagged-bad-report.json');
-  const jsonResult = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'json', output: jsonPath } });
-  assert.match(jsonResult.content[0].text, /tagged-bad\.pdf/);
-  const htmlPath = path.join(tmp, 'tagged-bad-report.html');
+test('render_report validates the report and writes HTML', async () => {
+  const jsonPath = path.join(tmp, 'render-input.json');
+  const json = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'json', output: jsonPath } });
+  assert.notEqual(json.isError, true);
+  const htmlPath = path.join(tmp, 'render-output.html');
   const rendered = await client.callTool({ name: 'render_report', arguments: { report: jsonPath, output: htmlPath } });
   assert.match(rendered.content[0].text, /HTML report written/);
-  const html = await fs.readFile(htmlPath, 'utf8');
-  assert.match(html, /What to fix first/);
+  assert.match(await fs.readFile(htmlPath, 'utf8'), /What to fix first/);
 });
 
 test('the CLI entry point can start the MCP server with --mcp', async () => {
@@ -80,18 +139,19 @@ test('the CLI entry point can start the MCP server with --mcp', async () => {
     cwd: process.cwd(),
     stderr: 'pipe',
   });
-  const local = new Client({ name: 'pdf-a11y-audit-cli-test', version: '1.0.0' });
-  await local.connect(transport);
+  const cliClient = new Client({ name: 'cli-mcp-test', version: '1.0.0' });
+  await cliClient.connect(transport);
   try {
-    const tools = await local.listTools();
+    const tools = await cliClient.listTools();
     assert.ok(tools.tools.some((tool) => tool.name === 'audit_pdf'));
   } finally {
-    await local.close().catch(() => {});
+    await cliClient.close().catch(() => {});
   }
 });
 
-test('rules resource is readable', async () => {
-  const resource = await client.readResource({ uri: 'remediate://rules' });
-  assert.match(resource.contents[0].text, /pdfua\.tagged/);
-  assert.match(resource.contents[0].text, /manual\.color-contrast/);
+test('resources are readable', async () => {
+  const rules = await client.readResource({ uri: 'remediate://rules' });
+  assert.match(rules.contents[0].text, /figures\.missing-alt/);
+  const methodology = await client.readResource({ uri: 'remediate://methodology' });
+  assert.match(methodology.contents[0].text, /blockingScore/);
 });

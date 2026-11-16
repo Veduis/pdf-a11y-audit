@@ -1,7 +1,7 @@
 {
   "name": "pdf-a11y-audit",
-  "version": "0.1.2",
-  "description": "Local-first PDF accessibility auditor with an MCP server, CLI, and self-contained HTML report.",
+  "version": "0.2.0",
+  "description": "Local-first PDF accessibility triage with an MCP server, CLI, SARIF output and a self-contained HTML report. Triage, not a PDF/UA validator.",
   "type": "module",
   "license": "MIT",
   "mcpName": "io.github.Veduis/pdf-a11y-audit",
@@ -27,7 +27,7 @@
     "audit": "node bin/cli.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

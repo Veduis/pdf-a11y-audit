@@ -64,6 +64,7 @@ function parseArgs(argv) {
 
 async function collect(paths, { recursive = true, maxDepth = 8, maxFiles = 5000 } = {}) {
   const out = [];
+  const visitedDirs = new Set();
   async function walk(input, depth) {
     if (out.length >= maxFiles) return;
     const absolute = path.resolve(process.cwd(), input);
@@ -71,12 +72,24 @@ async function collect(paths, { recursive = true, maxDepth = 8, maxFiles = 5000 
     if (!stat) throw new Error(`Not found: ${input}`);
     if (stat.isFile()) { out.push(absolute); return; }
     if (!stat.isDirectory() || depth > maxDepth) return;
+    let real = absolute;
+    try { real = await fs.realpath(absolute); } catch { /* keep absolute */ }
+    if (visitedDirs.has(real)) return;
+    visitedDirs.add(real);
     const entries = await fs.readdir(absolute, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-      if (entry.isFile() && /\.pdf$/i.test(entry.name)) out.push(path.join(absolute, entry.name));
-      if (recursive && entry.isDirectory()) await walk(path.join(absolute, entry.name), depth + 1);
+      const full = path.join(absolute, entry.name);
+      let isPdfFile = entry.isFile() && /\.pdf$/i.test(entry.name);
+      let isDirectory = entry.isDirectory();
+      if (entry.isSymbolicLink()) {
+        const target = await fs.stat(full).catch(() => null);
+        isPdfFile = isPdfFile || !!(target && target.isFile() && /\.pdf$/i.test(entry.name));
+        isDirectory = !!(target && target.isDirectory());
+      }
+      if (isPdfFile) out.push(full);
+      if (recursive && isDirectory) await walk(full, depth + 1);
       if (out.length >= maxFiles) return;
     }
   }

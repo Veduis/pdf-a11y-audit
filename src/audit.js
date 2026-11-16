@@ -763,7 +763,9 @@ export async function auditPdf(filePath, options = {}) {
   const visibleFindings = maxSeverityIndex >= 0
     ? finalFindings.filter((finding) => severityRank(finding.severity) <= maxSeverityIndex)
     : finalFindings;
-  const returnedFindings = visibleFindings.slice(0, maxFindings);
+  const offset = Math.max(0, Number(options.offset || 0));
+  const pageOfFindings = visibleFindings.slice(offset, offset + maxFindings);
+  const returnedFindings = pageOfFindings;
   const severityCounts = { critical: 0, serious: 0, moderate: 0, minor: 0, advisory: 0 };
   let occurrences = 0;
   for (const finding of finalFindings) {
@@ -850,7 +852,8 @@ export async function auditPdf(filePath, options = {}) {
       passed,
       failed,
       skipped,
-      truncated: returnedFindings.length < visibleFindings.length,
+      truncated: offset + returnedFindings.length < visibleFindings.length,
+      offset,
       filtered: maxSeverityIndex >= 0,
       scoreModel: SCORE_MODEL,
     },

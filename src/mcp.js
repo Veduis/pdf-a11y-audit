@@ -35,6 +35,7 @@ function error(message) {
 
 async function collectPdfPaths(inputs, { recursive = true, maxFiles = DEFAULT_MAX_FILES, maxDepth = DEFAULT_MAX_DEPTH } = {}) {
   const out = [];
+  const visitedDirs = new Set();
   let truncated = false;
   async function walk(input, depth) {
     if (out.length >= maxFiles) { truncated = true; return; }
@@ -43,16 +44,27 @@ async function collectPdfPaths(inputs, { recursive = true, maxFiles = DEFAULT_MA
     if (!stat) throw new Error(`Not found: ${input}`);
     if (stat.isFile()) { out.push(absolute); return; }
     if (!stat.isDirectory() || depth > maxDepth) return;
+    let real = absolute;
+    try { real = await fs.realpath(absolute); } catch { /* keep absolute */ }
+    if (visitedDirs.has(real)) return;
+    visitedDirs.add(real);
     const entries = await fs.readdir(absolute, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
       const full = path.join(absolute, entry.name);
-      if (entry.isFile() && /\.pdf$/i.test(entry.name)) {
+      let isPdfFile = entry.isFile() && /\.pdf$/i.test(entry.name);
+      let isDirectory = entry.isDirectory();
+      if (entry.isSymbolicLink()) {
+        const target = await fs.stat(full).catch(() => null);
+        isPdfFile = isPdfFile || !!(target && target.isFile() && /\.pdf$/i.test(entry.name));
+        isDirectory = !!(target && target.isDirectory());
+      }
+      if (isPdfFile) {
         out.push(full);
         if (out.length >= maxFiles) { truncated = true; return; }
       }
-      if (recursive && entry.isDirectory()) await walk(full, depth + 1);
+      if (recursive && isDirectory) await walk(full, depth + 1);
     }
   }
   for (const input of inputs) await walk(input, 0);
@@ -177,14 +189,15 @@ export function createServer() {
       format: z.enum(['summary', 'json', 'markdown', 'html']).optional().describe('Output format (default summary)'),
       output: z.string().optional().describe('Write the report to this path (HTML uses <name>-a11y-report.html in the current directory when omitted)'),
       maxFindings: z.number().int().positive().max(5000).optional().describe('Maximum findings to return; scores and counts always use every finding (default 500)'),
+      offset: z.number().int().min(0).optional().describe('Skip this many findings before returning them (pagination; scores are unaffected)'),
       minSeverity: z.enum(SEVERITY_ENUM).optional().describe('Only return findings at or above this severity (scores are unaffected)'),
       overwrite: z.boolean().optional().describe('Allow replacing an existing output file (default false)'),
     },
     outputSchema: summaryEnvelopeSchema.shape,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-  }, async ({ path: filePath, format = 'summary', output, maxFindings, minSeverity, overwrite = false }, extra) => {
+  }, async ({ path: filePath, format = 'summary', output, maxFindings, offset = 0, minSeverity, overwrite = false }, extra) => {
     try {
-      const report = await enqueueAudit(() => auditPdf(filePath, { maxFindings: maxFindings || DEFAULT_MAX_FINDINGS, minSeverity, signal: extra && extra.signal }));
+      const report = await enqueueAudit(() => auditPdf(filePath, { maxFindings: maxFindings || DEFAULT_MAX_FINDINGS, offset, minSeverity, signal: extra && extra.signal }));
       if (format === 'json') {
         const json = toJson(report);
         if (output) {

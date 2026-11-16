@@ -97,6 +97,28 @@ test('audit_batch fails soft on a corrupt PDF', async () => {
   assert.ok(result.structuredContent.reports.length >= 1);
 });
 
+test('audit_pdf findings can be paginated without changing scores', async () => {
+  const first = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'json', maxFindings: 2 } });
+  const second = await client.callTool({ name: 'audit_pdf', arguments: { path: files.taggedBad, format: 'json', maxFindings: 2, offset: 1 } });
+  const a = JSON.parse(first.content[0].text);
+  const b = JSON.parse(second.content[0].text);
+  assert.equal(a.findings.length, 2);
+  assert.equal(b.findings.length, 2);
+  assert.equal(a.summary.blockingScore, b.summary.blockingScore);
+  assert.equal(a.summary.occurrences, b.summary.occurrences);
+  assert.notEqual(a.findings[0].ruleId + a.findings[0].message, b.findings[0].ruleId + b.findings[0].message);
+});
+
+test('audit_batch follows symlinked PDFs with loop protection', async () => {
+  const dir = path.join(tmp, 'symlink-case');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.symlink(files.taggedGood, path.join(dir, 'linked.pdf'));
+  const result = await client.callTool({ name: 'audit_batch', arguments: { paths: [dir] } });
+  assert.equal(result.structuredContent.failed, 0);
+  assert.ok(result.structuredContent.count >= 1);
+  assert.match(result.content[0].text, /linked\.pdf/);
+});
+
 test('explain_finding and list_checks expose structured rule data', async () => {
   const explained = await client.callTool({ name: 'explain_finding', arguments: { ruleId: 'figures.missing-alt' } });
   assert.match(explained.content[0].text, /Figure has no alternative text/);

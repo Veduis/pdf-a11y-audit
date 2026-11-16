@@ -155,8 +155,8 @@ the form used by the registry manifest and by the `npx` configuration above.
 
 | Tool | What it does |
 |---|---|
-| `audit_pdf` | Audit one local PDF. Formats: `json`, `markdown`, `html`, `summary` (default). `minSeverity` filters findings; `overwrite: true` is required to replace an existing output file. |
-| `audit_batch` | Audit every PDF under one or more folders. Formats: `json`, `markdown`, `csv`. File count and folder depth are capped, and one unreadable file fails soft instead of aborting the batch. |
+| `audit_pdf` | Audit one local PDF. Formats: `json`, `markdown`, `html`, `summary` (default). `minSeverity` filters findings, `maxFindings`/`offset` paginate the returned list, and `overwrite: true` is required to replace an existing output file. |
+| `audit_batch` | Audit every PDF under one or more folders. Formats: `json`, `markdown`, `csv`. File count and folder depth are capped, symlinked PDFs are followed with loop protection, and one unreadable file fails soft instead of aborting the batch. |
 | `explain_finding` | Explain a rule, its standards mapping and its remediation. |
 | `list_checks` | List the automated and manual check catalog. |
 | `compare_reports` | Compare two reports for the same document and list new, fixed and persisting findings. Cross-document comparisons are refused. |
